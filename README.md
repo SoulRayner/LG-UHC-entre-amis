@@ -249,3 +249,5 @@ com.lguhc
 Pour ajouter un rôle : créez une classe qui implémente `Role`, enregistrez-la
 dans `RoleRegistry`, ajoutez sa valeur dans `RoleType`, et branchez son
 pouvoir actif dans `LGCommand` si besoin.
+#   L G - U H C - e n t r e - a m i s  
+ 
