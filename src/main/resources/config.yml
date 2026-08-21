@@ -1,0 +1,176 @@
+# ============================================================
+#  LGUHC - Configuration
+#  Plugin original, inspiré de l'esprit "Loup-Garou UHC" (UHC
+#  survie + Loup-Garou façon Thiercelieux), pas un clone d'un
+#  serveur en particulier : tout ici est fait pour être modifié
+#  librement selon vos préférences.
+# ============================================================
+
+monde:
+  # Nom du monde utilisé pour la partie (doit exister sur le serveur, ou être créé
+  # automatiquement au démarrage du plugin si absent - voir aussi regeneration-monde).
+  # ⚠️ NE METTEZ PAS ICI LE MONDE PAR DEFAUT DE VOTRE SERVEUR (le "level-name" de
+  # server.properties, "world" par défaut) : la régénération supprime et reconstruit
+  # ce monde à chaque partie. Utilisez un nom distinct, ex: world_lguhc.
+  nom: world_lguhc
+  # Nom du monde "lobby" statique où les joueurs attendent avant/après une partie.
+  # Jamais régénéré. Laissez vide ("") pour désactiver la fonctionnalité de lobby
+  # (les joueurs ne seront alors jamais téléportés automatiquement en dehors du
+  # monde de jeu, comme avant l'ajout de cette section).
+  lobby: world_lobby
+  # Rayon dans lequel les joueurs sont téléportés aléatoirement au lancement
+  rayon-teleportation-depart: 400
+  centre-x: 0
+  centre-z: 0
+
+# ============================================================
+#  Régénération du monde de jeu entre deux parties
+#  Principe : `dossier-modele` doit contenir une copie VIERGE (jamais
+#  chargée par le serveur) de votre export WorldPainter, déposée une
+#  fois pour toutes à la racine du serveur. A chaque régénération, le
+#  dossier du monde vivant (monde.nom ci-dessus) est supprimé puis
+#  remplacé par une copie fraîche de ce modèle.
+#
+#  Pour que minerais/lacs/structures soient DIFFERENTS à chaque partie
+#  (et pas simplement remis à l'identique), les chunks concernés doivent
+#  avoir été exportés depuis WorldPainter en laissant Minecraft les
+#  peupler lui-même (option "Let Minecraft populate the map" à
+#  l'export), PAS pré-peuplés par WorldPainter. Dans ce cas,
+#  `nouvelle-seed-a-chaque-partie` force une nouvelle seed à chaque
+#  régénération, ce qui re-tire aléatoirement le peuplement vanilla
+#  (minerais, lacs, structures) tout en gardant EXACTEMENT le même
+#  relief/biomes peints à la main (ça, ça ne change jamais).
+#  Note : des éléments peints/gravés directement dans WorldPainter
+#  (ex: un outil "Cave" appliqué à l'export plutôt que laissé à
+#  Minecraft) font partie du terrain figé et ne changeront donc pas
+#  d'une partie à l'autre, contrairement au peuplement vanilla.
+# ============================================================
+regeneration-monde:
+  active: true
+  dossier-modele: "world_template"
+  nouvelle-seed-a-chaque-partie: true
+  # Si true, une régénération est lancée automatiquement en tâche de fond
+  # dès /lg stop (en plus de rester disponible manuellement via /lg admin regen)
+  auto-apres-reset: true
+
+episodes:
+  # Durée d'un épisode en minutes (le mode LG UHC utilise 20 min à la base)
+  duree-minutes: 20
+  # Nombre de cycles jour/nuit par épisode (le premier épisode n'en a qu'un, sans rôles)
+  cycles-par-episode: 2
+  # A partir de cet épisode les rôles sont attribués et le PvP s'active (= 2 par défaut)
+  episode-attribution-roles: 2
+
+bordure:
+  taille-initiale: 1000
+  taille-minimale: 200
+  minutes-avant-mouvement: 80
+  # Vitesse de resserrement : un bord de la bordure avance d'1 bloc toutes les X secondes.
+  # (Remplace l'ancienne clé "minutes-pour-atteindre-taille-min", qui n'était en fait lue
+  # par aucun code : c'est bien secondes-par-bloc qui pilote la vitesse réelle.)
+  secondes-par-bloc: 15
+
+survie-uhc:
+  regeneration-naturelle: false
+  pomme-en-or-nerf: true          # Retire l'effet de Régénération de la pomme en or (garde l'Absorption)
+  seaux-de-lave-interdits: true
+  enchant-fire-aspect-interdit: true
+  enchant-flame-interdit: true
+  enchant-knockback-interdit: true
+  niveau-max-protection-fer: 3
+  niveau-max-protection-diamant: 2
+  niveau-max-tranchant: 3
+  niveau-max-puissance: 3
+  boussole-traqueuse: true         # donne une boussole qui pointe vers l'ennemi vivant le plus proche
+  duree-immunite-feu-minutes: 20   # aucun dégât de feu/lave pendant ces X premières minutes de jeu après /lg start
+
+vote:
+  active: true
+  # 1 vote à chaque épisode à partir de celui-ci. Il faut au moins 3 votes sur
+  # un même joueur pour qu'il soit sanctionné (Poison I 13s + pseudo annoncé
+  # avec 4 rôles tirés au sort parmi les vivants, dont le sien).
+  episode-premier-vote: 3
+  duree-secondes: 120
+
+groupes-dynamiques:
+  active: true
+  paliers:
+    - min-vivants: 19
+      taille-groupe: 5
+    - min-vivants: 13
+      taille-groupe: 4
+    - min-vivants: 0
+      taille-groupe: 3
+
+# ============================================================
+#  Compositions personnalisées (optionnel)
+#  Par défaut, la composition est calculée automatiquement (voir
+#  joueurs-par-loup ci-dessous) pour n'importe quel nombre de joueurs.
+#
+#  Pour un effectif précis, vous pouvez à la place définir ici une liste de
+#  rôles EXACTE : dès qu'une partie démarre avec ce nombre de joueurs vivants,
+#  cette liste est utilisée telle quelle (mélangée aléatoirement entre les
+#  joueurs), et le calcul automatique est ignoré pour ce nombre-là. Les
+#  autres effectifs, sans entrée ici, continuent d'utiliser le calcul
+#  automatique normalement.
+#
+#  - La clé est le nombre de joueurs (nombre entier).
+#  - La liste doit contenir EXACTEMENT ce nombre de rôles, sinon elle est
+#    ignorée (avertissement dans la console au démarrage) et le calcul
+#    automatique reprend la main pour ce nombre de joueurs.
+#  - Identifiants de rôles valides : ceux utilisés par /lg admin role et
+#    /lg admin roles (VOYANTE, MONTREUR_OURS, RENARD, DRUIDE, PETITE_FILLE,
+#    SORCIERE, CHASSEUR, IDIOT_VILLAGE, ANCIEN, SOEURS, LOUP_GAROU,
+#    INFECT_PERE_LOUPS, LOUP_GAROU_BLANC, LOUP_PERFIDE, LOUP_MYSTIQUE,
+#    CUPIDON, ENFANT_SAUVAGE, ASSASSIN).
+#  - Aucune recompilation nécessaire pour modifier/ajouter une composition :
+#    juste redémarrer le serveur (ou /reload).
+# ============================================================
+compositions:
+  14:
+    - VOYANTE
+    - INFECT_PERE_LOUPS
+    - SORCIERE
+    - LOUP_PERFIDE
+    - PETITE_FILLE
+    - ANCIEN
+    - LOUP_GAROU
+    - CHASSEUR
+    - MONTREUR_OURS
+    - ASSASSIN
+    - LOUP_GAROU
+    - ENFANT_SAUVAGE
+    - IDIOT_VILLAGE
+    - LOUP_MYSTIQUE
+  19:
+    - VOYANTE
+    - INFECT_PERE_LOUPS
+    - SORCIERE
+    - LOUP_PERFIDE
+    - PETITE_FILLE
+    - ANCIEN
+    - LOUP_GAROU
+    - CHASSEUR
+    - MONTREUR_OURS
+    - ASSASSIN
+    - LOUP_GAROU
+    - ENFANT_SAUVAGE
+    - IDIOT_VILLAGE
+    - LOUP_MYSTIQUE
+    - RENARD
+    - LOUP_GAROU
+    - LOUP_GAROU_BLANC
+    - DRUIDE
+    - CUPIDON
+
+# ============================================================
+#  Composition automatique (utilisée pour tout effectif sans entrée
+#  dans "compositions" ci-dessus). Voir CompositionManager.java pour
+#  l'ordre de priorité des rôles Village/Loups.
+#
+#  Seul réglage exposé ici : le ratio de Loups-Garous dans la meute. 3 =
+#  environ 1 Loup pour 3 joueurs (arrondi au-dessus, toujours au moins 1
+#  Loup). Augmentez pour moins de Loups (parties plus douces), diminuez
+#  pour plus de Loups (parties plus tendues).
+# ============================================================
+joueurs-par-loup: 3

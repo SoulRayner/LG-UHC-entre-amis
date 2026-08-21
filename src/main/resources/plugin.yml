@@ -1,0 +1,23 @@
+name: LGUHC
+version: '${project.version}'
+main: com.lguhc.LGUHCPlugin
+api-version: 1.13
+author: Toi & tes potes
+description: Mode de jeu Loup-Garou UHC (rôles + survie UHC) pour Minecraft 1.8
+
+commands:
+  lg:
+    description: Commande principale du mode Loup-Garou UHC
+    usage: /lg <sous-commande>
+    aliases: [loupgarou, lguhc]
+  lw:
+    description: Laisser un dernier mot qui s'affichera à votre mort
+    usage: /lw <message>
+
+permissions:
+  lguhc.host:
+    description: Autorise à démarrer/configurer/forcer les parties
+    default: op
+  lguhc.play:
+    description: Autorise à rejoindre une partie
+    default: true

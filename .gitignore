@@ -1,0 +1,9 @@
+# Fichiers de compilation Java
+target/
+*.jar
+*.class
+
+# Fichiers d'IDE
+.idea/
+*.iml
+.vscode/
