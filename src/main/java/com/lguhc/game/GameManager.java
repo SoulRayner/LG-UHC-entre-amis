@@ -82,7 +82,7 @@ public class GameManager {
     }
 
     /** Délai de grâce accordé à un joueur qui se déconnecte en pleine partie avant d'être éliminé définitivement (un simple crash ne doit pas coûter la partie). */
-    private static final long DELAI_GRACE_DECONNEXION_SECONDES = 2 * 60L;
+    private static final long DELAI_GRACE_DECONNEXION_SECONDES = 5 * 60L;
     /**
      * UUID des joueurs actuellement déconnectés en pleine partie, associé à l'horodatage réel
      * (System.currentTimeMillis()) auquel ils seront éliminés faute d'être revenus à temps.
@@ -1553,7 +1553,7 @@ public class GameManager {
             return;
         }
         echeancesDeconnexion.put(gp.getUuid(), System.currentTimeMillis() + DELAI_GRACE_DECONNEXION_SECONDES * 1000L);
-        diffuser("&e" + gp.getNom() + " &7s'est déconnecté(e). &f2 minutes &7pour revenir avant d'être éliminé(e) de la partie.");
+        diffuser("&e" + gp.getNom() + " &7s'est déconnecté(e). &f5 minutes &7pour revenir avant d'être éliminé(e) de la partie.");
     }
 
     /**
