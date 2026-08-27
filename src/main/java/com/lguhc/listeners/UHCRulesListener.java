@@ -469,11 +469,8 @@ public class UHCRulesListener implements Listener {
         boolean estDegatFeuOuLave = cause == EntityDamageEvent.DamageCause.FIRE
                 || cause == EntityDamageEvent.DamageCause.FIRE_TICK
                 || cause == EntityDamageEvent.DamageCause.LAVA;
-        if (!estDegatFeuOuLave || !plugin.getGameManager().estEnCours()) {
-            return;
-        }
-        long dureeImmuniteSecondes = plugin.getConfig().getLong("survie-uhc.duree-immunite-feu-minutes", 20) * 60L;
-        if (plugin.getGameManager().getTempsTotalEcouleSecondes() < dureeImmuniteSecondes) {
+
+        if (estDegatFeuOuLave && plugin.getGameManager().estEnCours()) {
             event.setCancelled(true);
         }
     }
@@ -617,8 +614,7 @@ public class UHCRulesListener implements Listener {
         return dropDeBase * (bonus + 1);
     }
 
-    private static final java.util.Set<Material> OBJETS_DIAMANT_LIMITES = java.util.EnumSet.of(
-            Material.DIAMOND_SWORD, Material.DIAMOND_PICKAXE, Material.DIAMOND_AXE, Material.DIAMOND_SPADE, Material.DIAMOND_HOE,
+    private static final java.util.Set<Material> PIECES_ARMURE_DIAMANT = java.util.EnumSet.of(
             Material.DIAMOND_HELMET, Material.DIAMOND_CHESTPLATE, Material.DIAMOND_LEGGINGS, Material.DIAMOND_BOOTS
     );
 
@@ -631,26 +627,32 @@ public class UHCRulesListener implements Listener {
             return;
         }
         Material typeResultat = event.getRecipe().getResult().getType();
-        if (!OBJETS_DIAMANT_LIMITES.contains(typeResultat)) {
+
+        // Si l'objet crafté n'est pas une pièce d'armure (ex: pioche, épée), on laisse passer sans limite
+        if (!PIECES_ARMURE_DIAMANT.contains(typeResultat)) {
             return;
         }
+
         Player joueur = (Player) event.getWhoClicked();
-        int limite = plugin.getConfig().getInt("survie-uhc.limite-stuff-diamant", 2);
-        if (compterObjetsEnDiamant(joueur) >= limite) {
+        int limite = plugin.getConfig().getInt("survie-uhc.limite-pieces-armure-diamant", 2);
+
+        if (compterArmureDiamant(joueur) >= limite) {
             event.setCancelled(true);
-            Msg.envoyer(joueur, "&cVous avez déjà atteint la limite de " + limite + " objet(s) en diamant.");
+            Msg.envoyer(joueur, "&cVous avez déjà atteint la limite de " + limite + " pièces d'armure en diamant.");
         }
     }
 
-    private int compterObjetsEnDiamant(Player joueur) {
+    private int compterArmureDiamant(Player joueur) {
         int total = 0;
+        // Vérifie les pièces d'armure dans l'inventaire
         for (ItemStack item : joueur.getInventory().getContents()) {
-            if (item != null && OBJETS_DIAMANT_LIMITES.contains(item.getType())) {
+            if (item != null && PIECES_ARMURE_DIAMANT.contains(item.getType())) {
                 total += item.getAmount();
             }
         }
+        // Vérifie les pièces d'armure actuellement équipées
         for (ItemStack item : joueur.getInventory().getArmorContents()) {
-            if (item != null && OBJETS_DIAMANT_LIMITES.contains(item.getType())) {
+            if (item != null && PIECES_ARMURE_DIAMANT.contains(item.getType())) {
                 total += item.getAmount();
             }
         }

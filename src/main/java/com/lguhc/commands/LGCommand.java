@@ -278,7 +278,9 @@ public class LGCommand implements CommandExecutor {
                 // l'Infect Père reste sur l'Aura de son rôle d'origine mais est un vrai Loup-Garou.
                 boolean estLoup = cibleGP.getCamp() == Camp.LOUPS;
                 int loupsTrouves = gp.getEtat("renard_loups_trouves", 0) + (estLoup ? 1 : 0);
+
                 int nouvellesUtilisations = gp.getEtat("renard_utilisations", 0) + 1;
+
                 gp.setEtat("renard_utilisations", nouvellesUtilisations);
                 gp.setEtat("renard_loups_trouves", loupsTrouves);
                 Msg.envoyer(p, "&6Flairage réussi sur " + cibleGP.getNom() + " ! (" + nouvellesUtilisations + "/" + RenardRole.UTILISATIONS_MAX + ")");
