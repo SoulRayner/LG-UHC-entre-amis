@@ -10,11 +10,18 @@ package com.lguhc.game;
  * L'Aura est fixée explicitement par rôle (indépendamment du camp de
  * départ) :
  *  - Lumineuse : Voyante, Renard, Montreur d'Ours, Idiot du Village,
- *    Loup-Garou Mystique, Cupidon
+ *    Loup-Garou Mystique, Cupidon, Analyste
  *  - Neutre    : Petite Fille, Chasseur, Ancien, Loup-Garou Perfide,
  *    Enfant Sauvage
  *  - Obscure   : Sorcière, Druide, Loup-Garou, Infect Père des Loups,
- *    Loup-Garou Blanc, Assassin
+ *    Loup-Garou Blanc, Assassin, Loup-Garou Amnésique
+ *
+ * Cas particulier - Analyste : son Aura de départ est Lumineuse comme
+ * ci-dessus, mais devient Obscure en cours de partie dès qu'il observe ou
+ * analyse un joueur (voir AnalysteRole). Cette bascule est un état de
+ * GamePlayer (gp.setAura(...), distinct de RoleType#getAura() qui reste
+ * la valeur de départ) : tout affichage de l'Aura d'un joueur en cours de
+ * partie doit donc préférer gp.getAura() à gp.getRole().getAura().
  */
 public enum RoleType {
 
@@ -29,13 +36,15 @@ public enum RoleType {
     IDIOT_VILLAGE("Idiot du Village", Camp.VILLAGE, Aura.LUMINEUSE, "§7Si un non-Loup vous tue, vous réapparaissez instantanément à pleine vie ailleurs sur la carte (rôle révélé). Un Loup vous tue pour de bon."),
     ANCIEN("Ancien", Camp.VILLAGE, Aura.NEUTRE, "§7Resistance quasi permanente. Ressuscite 1x si tué par un Loup ; si tué par un non-Loup, le tueur perd tout."),
     SOEURS("Sœurs", Camp.VILLAGE, Aura.LUMINEUSE, "§7Vous connaissez l'identité de l'autre Sœur : §f/lg soeur <message> §7lui envoie un message privé (2 fois par épisode)."),
+    ANALYSTE("Analyste", Camp.VILLAGE, Aura.LUMINEUSE, "§7Dès 50 minutes de jeu, §f/lg observer <joueur> §7(5 fois par partie, 5 min de cooldown) révèle s'il possède au moins un effet parmi Force / Résistance / Faiblesse / Vitesse / Invisibilité / Absorption. §f/lg analyser <joueur> §7(1 fois par partie, sur un joueur déjà observé) révèle précisément le(s) effet(s) qu'il possédait au moment de cette observation - le joueur analysé en est informé, et apprend votre identité s'il n'est pas du Village. §cVotre Aura devient Obscure dès que vous observez ou analysez un joueur."),
 
     // --- Loups-Garous ---
     LOUP_GAROU("Loup-Garou", Camp.LOUPS, Aura.OBSCURE, "§7Aucune commande pour tuer : éliminez vos victimes en combat direct. Tous les Loups ont aussi §f/lg hurler §7(1x/partie, révèle les Loups proches) et §f/lg meute <message> §7pour se parler."),
     INFECT_PERE_LOUPS("Infect Père des Loups", Camp.LOUPS, Aura.OBSCURE, "§7Corrompt les joueurs proches de vous au fil du temps. Quand une victime corrompue meurt, §f/lg infecter §7la relève en Loup-Garou (fenêtre limitée) — peut aussi ressusciter un allié Loup fraîchement tué."),
-    LOUP_GAROU_BLANC("Loup-Garou Blanc", Camp.LOUPS, Aura.OBSCURE, "§7Loup-Garou en apparence, mais qui doit gagner seul : une nuit paire sur deux, §f/lg loupblanc <joueur> §7dévore en secret un autre Loup-Garou."),
+    LOUP_GAROU_BLANC("Loup-Garou Blanc", Camp.LOUPS, Aura.OBSCURE, "§7Mêmes pouvoirs qu'un Loup-Garou normal (combat direct, §f/lg hurler§7, §f/lg meute§7) — aucune commande à part. Mais vous ne gagnez PAS avec la meute : le moment venu, vous devrez éliminer vous-même vos anciens alliés Loups pour rester l'unique survivant."),
     LOUP_PERFIDE("Loup-Garou Perfide", Camp.LOUPS, Aura.NEUTRE, "§7Une fois par nuit, §f/lg perfide §7retire votre armure et vous rend invisible 5 minutes — rompu si vous rééquipez une armure."),
     LOUP_MYSTIQUE("Loup-Garou Mystique", Camp.LOUPS, Aura.LUMINEUSE, "§7Quand un Loup-Garou meurt, vous recevez le nom et le rôle d'un joueur d'un autre camp."),
+    LOUP_GAROU_AMNESIQUE("Loup-Garou Amnésique", Camp.LOUPS, Aura.OBSCURE, "§7Vous avez oublié votre nature de Loup. Votre liste d'alliés ne contient au départ que vous-même : elle se complète d'elle-même quand vous croisez un autre Loup-Garou à moins de 10 blocs. Vous ne figurerez dans la liste des alliés Loups (côté meute) qu'après un long moment, entre 70 et 90 minutes de jeu tirées au sort. §7Vous avez l'effet §fForce §7la nuit, et §f/lg hurler §7reste disponible (1x/partie, comme tout Loup). §7Tuer un joueur vous donne §fVitesse §7et §f2♥ d'Absorption §7pendant 1 minute."),
 
     // --- Hybrides ---
     // Camp de départ = VILLAGE (logique de victoire inchangée), mais couleur
@@ -140,6 +149,15 @@ public enum RoleType {
 
     /** Phrase d'objectif affichée dans la carte, dérivée du camp de départ (pas du camp actuel). */
     private String getPhraseObjectif() {
+        // Loup-Garou Blanc : compté dans le camp des Loups pour toutes les mécaniques de jeu
+        // (chat de meute, vision de nuit...), mais ne gagne PAS avec eux - voir
+        // GameManager#verifierVictoire, qui ne le fait gagner que s'il finit unique survivant.
+        // Cas particulier avant le switch sur campDepart, sinon la phrase générique "gagner avec
+        // les Loups-Garous" ci-dessous contredirait sa description ("doit gagner seul") juste en
+        // dessous dans la même carte.
+        if (this == LOUP_GAROU_BLANC) {
+            return "Vous apparaissez comme un Loup-Garou aux yeux de tous, mais vous devez gagner SEUL : soyez l'unique survivant.";
+        }
         switch (campDepart) {
             case LOUPS:
                 return "Vous devez gagner avec les Loups-Garous.";

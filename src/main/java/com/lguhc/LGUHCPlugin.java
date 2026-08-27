@@ -1,11 +1,14 @@
 package com.lguhc;
 
+import com.lguhc.commands.HelpOpCommand;
+import com.lguhc.commands.HostCommand;
 import com.lguhc.commands.LGCommand;
 import com.lguhc.commands.LWCommand;
 import com.lguhc.game.BorderManager;
 import com.lguhc.game.CompositionManager;
 import com.lguhc.game.CoupleManager;
 import com.lguhc.game.DeathManager;
+import com.lguhc.game.EvenementAleatoireManager;
 import com.lguhc.game.GameManager;
 import com.lguhc.game.GamePlayer;
 import com.lguhc.game.ScoreboardManager;
@@ -13,11 +16,17 @@ import com.lguhc.game.VisionMinesTask;
 import com.lguhc.game.VoteManager;
 import com.lguhc.game.WorldResetManager;
 import com.lguhc.listeners.AbilityListener;
+import com.lguhc.listeners.AmnesiqueListener;
+import com.lguhc.listeners.ChatToggleListener;
 import com.lguhc.listeners.CoupleListener;
 import com.lguhc.listeners.DeconnexionListener;
 import com.lguhc.listeners.LobbyListener;
+import com.lguhc.listeners.HelpOpListener;
+import com.lguhc.listeners.RumeursListener;
 import com.lguhc.listeners.UHCRulesListener;
+import com.lguhc.menu.ConfigMenu;
 import com.lguhc.roles.RoleRegistry;
+import com.lguhc.util.HelpOpManager;
 import com.lguhc.util.Msg;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
@@ -39,9 +48,10 @@ public class LGUHCPlugin extends JavaPlugin {
     private RoleRegistry roleRegistry;
     private VisionMinesTask visionMinesTask;
     private WorldResetManager worldResetManager;
+    private ConfigMenu configMenu;
+    private EvenementAleatoireManager evenementAleatoireManager;
+    private HelpOpManager helpOpManager;
 
-    /** Délai avant le Final Heal (tous les joueurs vivants remis à full vie), en secondes RÉELLES depuis le début de la partie. */
-    private static final int FINAL_HEAL_SECONDES = 20 * 60;
     private boolean finalHealDeclenche = false;
 
     @Override
@@ -59,8 +69,16 @@ public class LGUHCPlugin extends JavaPlugin {
         this.deathManager = new DeathManager();
         this.scoreboardManager = new ScoreboardManager();
         this.worldResetManager = new WorldResetManager(this);
+        this.configMenu = new ConfigMenu(this);
+        this.evenementAleatoireManager = new EvenementAleatoireManager();
+        this.helpOpManager = new HelpOpManager();
 
         compositionManager.charger(getConfig().getInt("joueurs-par-loup", 3), getConfig().getConfigurationSection("compositions"));
+        evenementAleatoireManager.charger(getConfig().getConfigurationSection("evenements-aleatoires"));
+        // Rôles activés/désactivés manuellement via /lg config > Compo (voir ConfigMenu). Persisté
+        // à part de "compositions" (qui définit des listes exactes par nombre de joueurs) : ceci ne
+        // filtre que le calcul AUTOMATIQUE (CompositionManager#construireListeRolesAutomatique).
+        compositionManager.chargerRolesDesactives(getConfig().getStringList("compo-manuelle.roles-desactives"));
         borderManager.charger(getConfig().getConfigurationSection("bordure"));
         voteManager.charger(getConfig().getConfigurationSection("vote"));
         gameManager.chargerGroupes(getConfig().getConfigurationSection("groupes-dynamiques"));
@@ -79,21 +97,30 @@ public class LGUHCPlugin extends JavaPlugin {
         }
         chargerMondeSiBesoin(nomMondeJeu);
         chargerMondeSiBesoin(getConfig().getString("monde.lobby", null));
+        appliquerReglagesMondeLobby(getConfig().getString("monde.lobby", null));
 
         getServer().getPluginManager().registerEvents(new UHCRulesListener(this), this);
         getServer().getPluginManager().registerEvents(new AbilityListener(this), this);
         getServer().getPluginManager().registerEvents(new CoupleListener(this), this);
         getServer().getPluginManager().registerEvents(new LobbyListener(this), this);
         getServer().getPluginManager().registerEvents(new DeconnexionListener(this), this);
+        getServer().getPluginManager().registerEvents(new AmnesiqueListener(this), this);
+        getServer().getPluginManager().registerEvents(new RumeursListener(this), this);
+        getServer().getPluginManager().registerEvents(new HelpOpListener(this), this);
+        getServer().getPluginManager().registerEvents(new ChatToggleListener(this), this);
+        getServer().getPluginManager().registerEvents(configMenu, this);
 
         getCommand("lg").setExecutor(new LGCommand(this));
         getCommand("lw").setExecutor(new LWCommand(this));
+        getCommand("helpop").setExecutor(new HelpOpCommand(this));
+        getCommand("host").setExecutor(new HostCommand());
 
         this.visionMinesTask = new VisionMinesTask(this);
         this.visionMinesTask.demarrer();
 
         Bukkit.getScheduler().runTaskTimer(this, () -> {
             gameManager.tickCorruption();
+            gameManager.tickLoupGarouAmnesique();
             gameManager.tickBoussole();
             // Doit s'exécuter juste après tickBoussole() : les deux ciblent le même attribut
             // natif de boussole du joueur, donc l'ordre d'appel décide laquelle "gagne" visuellement.
@@ -105,6 +132,7 @@ public class LGUHCPlugin extends JavaPlugin {
             // GameManager.demarrer()/tickMinuteriesAutomatiques() (bascule sur horloge réelle).
             gameManager.tickMinuteriesAutomatiques();
             gameManager.tickDeconnexions();
+            gameManager.tickInvincibiliteDebut();
             tickFinalHeal();
         }, 20L, 20L);
 
@@ -132,6 +160,31 @@ public class LGUHCPlugin extends JavaPlugin {
         }
     }
 
+    /**
+     * Jour permanent, aucune météo, aucun spawn naturel de mob (monstres ET animaux) dans le
+     * monde lobby. Réappliqué à chaque démarrage du plugin (idempotent, sans effet si déjà
+     * positionné) plutôt qu'une seule fois à la création du monde : ces réglages vivent dans le
+     * level.dat du monde lobby, donc sans ce réappel ils resteraient corrects tant que personne
+     * n'y touche, mais un /gamerule ou un /toggledownfall tapé à la main par un admin (ou un
+     * autre plugin) les ferait dériver silencieusement jusqu'au prochain redémarrage.
+     * L'immortalité et l'absence de faim, elles, sont gérées par joueur dans LobbyListener (pas
+     * ici : ce sont des états de joueur, pas des réglages de monde).
+     */
+    private void appliquerReglagesMondeLobby(String nomLobby) {
+        if (nomLobby == null || nomLobby.isEmpty()) {
+            return;
+        }
+        World lobby = Bukkit.getWorld(nomLobby);
+        if (lobby == null) {
+            return;
+        }
+        lobby.setTime(6000L);
+        lobby.setGameRuleValue("doDaylightCycle", "false");
+        lobby.setStorm(false);
+        lobby.setThundering(false);
+        lobby.setSpawnFlags(false, false);
+    }
+
     @Override
     public void onDisable() {
         if (visionMinesTask != null) {
@@ -141,9 +194,18 @@ public class LGUHCPlugin extends JavaPlugin {
     }
 
     /**
-     * A 20 minutes RÉELLES pile depuis le début de la partie en cours (drapeau remis à false dès
-     * que gameManager.estEnCours() redevient faux, donc à chaque nouvelle partie), remet tous les
-     * joueurs vivants à leur vie maximale, une seule fois.
+     * Réglable via /lg config > Règle (survie-uhc.final-heal-minutes, 20 min par défaut). Ancien
+     * FINAL_HEAL_SECONDES figé en dur, converti en lecture config à chaque appel (1x/s, coût
+     * négligeable) pour que ConfigMenu puisse le modifier sans redémarrage.
+     */
+    private long getFinalHealSecondes() {
+        return getConfig().getLong("survie-uhc.final-heal-minutes", 20) * 60L;
+    }
+
+    /**
+     * Au bout de la durée réglée ci-dessus, écoulée en temps RÉEL depuis le début de la partie en
+     * cours (drapeau remis à false dès que gameManager.estEnCours() redevient faux, donc à chaque
+     * nouvelle partie), remet tous les joueurs vivants à leur vie maximale, une seule fois.
      * Se base sur gameManager.getTempsTotalEcouleSecondes() (System.currentTimeMillis(), donc une
      * vraie horloge murale) plutôt que sur un compteur incrémenté à chaque appel de ce minuteur :
      * l'ancien compteur supposait implicitement que ce minuteur s'exécute exactement 1x par
@@ -157,7 +219,7 @@ public class LGUHCPlugin extends JavaPlugin {
             finalHealDeclenche = false;
             return;
         }
-        if (finalHealDeclenche || gameManager.getTempsTotalEcouleSecondes() < FINAL_HEAL_SECONDES) {
+        if (finalHealDeclenche || gameManager.getTempsTotalEcouleSecondes() < getFinalHealSecondes()) {
             return;
         }
         finalHealDeclenche = true;
@@ -210,5 +272,17 @@ public class LGUHCPlugin extends JavaPlugin {
 
     public WorldResetManager getWorldResetManager() {
         return worldResetManager;
+    }
+
+    public ConfigMenu getConfigMenu() {
+        return configMenu;
+    }
+
+    public EvenementAleatoireManager getEvenementAleatoireManager() {
+        return evenementAleatoireManager;
+    }
+
+    public HelpOpManager getHelpOpManager() {
+        return helpOpManager;
     }
 }

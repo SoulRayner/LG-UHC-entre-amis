@@ -234,6 +234,81 @@ outil appliqué côté WorldPainter plutôt que laissé à Minecraft) fait parti
 figé et restera identique à chaque partie, contrairement au peuplement vanilla (ores,
 lacs, structures) qui lui se retire à chaque régénération.
 
+## 7ter. `/lg config` — menu de configuration avant `/lg start`
+
+Réservé à `lguhc.host`. Ouvre un menu à onglets (blocs cliquables) pour régler la partie avant de
+la lancer, sans passer par `config.yml` à la main :
+
+| Onglet | Bloc | Effet |
+|---|---|---|
+| **Compo** | Bibliothèque | 4 sous-catégories (Village / Loups-Garous / Hybrides / Solitaire) listant chaque rôle : clic pour l'activer/désactiver dans le tirage **automatique** (celui basé sur `joueurs-par-loup`). Le Loup-Garou de base reste toujours actif (rôle de secours). Liste paginée (45 rôles/page) pour rester utilisable même quand plus de rôles seront ajoutés plus tard. N'affecte PAS les compositions personnalisées de la section `compositions` (listes exactes par nombre de joueurs) : celles-ci restent à éditer dans `config.yml` comme avant. |
+| **Événement aléatoire** | Étoile du Nether | 3 toggles **indépendants** (Exposed / Exposed Inversé / Rumeurs - activer l'un n'active pas les autres), et règle leurs fenêtres de déclenchement (minutes de jeu réel). Voir section 8 ci-dessous. |
+| **Règle** | Enclume | Limites d'enchantement (Tranchant général + Tranchant Solitaire, Protection fer/diamant, Puissance arc), limite de diamants minés, limite d'objets en diamant craftables, et les 4 minuteries de partie (annonce des rôles, Final Heal, liste des alliés Loups, début du resserrement de bordure). Clic gauche = augmenter, clic droit = diminuer. |
+| **Map** | Carte | Taille de la bordure au lancement (pas de 250, défaut 1000). |
+| **WIP #1 / WIP #2** | Barrière / Toile d'araignée | Réservés pour plus tard, ne font rien pour l'instant. |
+
+Chaque changement est appliqué et sauvegardé dans `config.yml` immédiatement (pas besoin de
+`/reload` ni de redémarrer). Les nouveaux réglages introduits pour cet écran (`survie-uhc.niveau-max-tranchant-solo`,
+`survie-uhc.limite-stuff-diamant`, `survie-uhc.limite-diamants-mines`, `survie-uhc.final-heal-minutes`,
+`survie-uhc.minutes-avant-liste-loups`) prennent la valeur par défaut indiquée dans le menu tant
+qu'ils n'existent pas encore dans votre `config.yml`.
+
+`BorderManager` gère aussi une taille minimale (`bordure.taille-minimale`, 200 par défaut) et une
+vitesse de resserrement (`bordure.secondes-par-bloc`, 15 par défaut) : pas exposées dans le menu
+Map car non demandées, mais ça se rajoute en une entrée dans `ConfigMenu.REGLAGES_REGLES` si vous
+en avez besoin.
+
+**Limite d'objets en diamant** : ne bloque aujourd'hui que le *craft* (table d'artisanat/inventaire).
+Un objet en diamant obtenu autrement (butin d'un joueur mort, `/give` admin...) n'est pas concerné.
+Si vous voyez un moyen de contourner la limite en jeu, dites-le moi et j'étendrai la vérification.
+
+## 8. Événements aléatoires : Exposed / Exposed Inversé / Rumeurs
+
+Les 3 sont désactivés par défaut, et s'activent **indépendamment** les uns des autres dans
+`/lg config` > **Événement aléatoire** (activer Rumeurs seul, sans Exposed ni Exposed Inversé, est
+par exemple tout à fait possible).
+
+### Exposed / Exposed Inversé
+
+Ces deux-là partagent les 2 mêmes fenêtres de déclenchement (temps de jeu réel depuis `/lg start`,
+horaires tirés une seule fois au lancement) :
+
+- Le **1er** entre 60 et 80 minutes par défaut.
+- Le **2e** entre 100 et 120 minutes par défaut.
+
+Les 4 bornes (min/max de chaque fenêtre) sont réglables directement dans l'onglet, sur le même
+principe +/- que les autres réglages numériques du menu.
+
+À chaque horaire, ce qui se passe dépend des toggles des deux :
+- Si les deux sont actifs, un tirage au sort (50/50) détermine lequel survient — sauf si Exposed
+  Inversé n'est pas jouable à ce moment-là (il faut au moins 5 joueurs vivants), auquel cas c'est
+  toujours Exposed qui a lieu.
+- Si un seul des deux est actif, c'est toujours lui qui joue à cet horaire.
+
+**Exposed** : un joueur vivant tiré au sort voit son pseudo annoncé dans le chat général à côté de
+4 rôles distincts - le sien (toujours présent), un rôle d'un camp différent du sien, et deux rôles
+supplémentaires tirés au hasard. Au moins 2 des 4 rôles affichés sont des rôles du camp Village
+(Cupidon/Enfant Sauvage inclus). Les rôles proposés sont piochés parmi ceux effectivement détenus
+par des joueurs vivants (même principe que l'annonce de sanction du vote), pour rester cohérent
+avec ce que les autres joueurs peuvent réellement déduire en jeu.
+
+**Exposed Inversé** : 5 joueurs vivants tirés au sort sont tous affichés côte à côte dans le chat
+général, à côté d'un seul et même rôle. Ce rôle est réellement détenu par l'un des 5 (l'unique
+"vrai", les 4 autres servent de leurre) : contrairement à Exposed, l'info n'est donc jamais un pur
+mensonge, juste noyée dans le bruit.
+
+### Rumeurs
+
+Contrairement aux deux ci-dessus, Rumeurs a sa **propre** fenêtre de déclenchement, indépendante,
+tirée une seule fois entre 80 et 120 minutes par défaut (bornes réglables dans l'onglet, comme
+Exposed/Exposed Inversé).
+
+À l'horaire tiré, un message annonce à tous les joueurs qu'ils ont 20 secondes pour envoyer un
+message dans le chat général. Chaque message envoyé pendant cette fenêtre n'apparaît PAS dans le
+chat au moment où il est tapé (un seul message pris en compte par joueur) : une fois les 20
+secondes écoulées, tous les messages reçus sont réaffichés d'un coup, anonymement et dans un ordre
+mélangé - impossible de savoir qui a écrit quoi.
+
 ## 7bis. Architecture (si vous voulez modifier/ajouter des rôles)
 
 ```
@@ -243,6 +318,7 @@ com.lguhc
 ├── roles/              (1 classe par rôle, regroupées villageois/loups/hybrides/solitaires)
 ├── commands/           (/lg et /lw)
 ├── listeners/          (règles UHC + pouvoirs déclenchés par événement)
+├── menu/               (ConfigMenu, CategorieRole, ConfigMenuHolder — le menu /lg config)
 └── util/               (ItemBuilder, messages)
 ```
 

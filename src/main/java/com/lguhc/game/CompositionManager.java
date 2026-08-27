@@ -5,10 +5,12 @@ import org.bukkit.configuration.ConfigurationSection;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.logging.Logger;
 
 /**
@@ -54,6 +56,16 @@ public class CompositionManager {
     /** Compositions personnalisées chargées depuis config.yml (section "compositions"), indexées par nombre de joueurs. */
     private final Map<Integer, List<RoleType>> compositionsPersonnalisees = new HashMap<>();
 
+    /**
+     * Rôles exclus du calcul AUTOMATIQUE (voir construireListeRolesAutomatique), réglés via
+     * /lg config > Compo (menu ConfigMenu) et persistés à part dans config.yml
+     * (compo-manuelle.roles-desactives), indépendamment de la section "compositions" ci-dessus
+     * (qui définit des listes exactes par nombre de joueurs et n'est pas affectée par ce filtre).
+     * LOUP_GAROU ne peut jamais y figurer : c'est le rôle de secours qui comble les places
+     * restantes, le retirer casserait le filet de sécurité déjà documenté plus bas.
+     */
+    private final Set<RoleType> rolesDesactives = EnumSet.noneOf(RoleType.class);
+
     /** Rôles spéciaux de meute, dans l'ordre où ils apparaissent à mesure que la meute grandit. */
     private static final List<RoleType> ORDRE_LOUPS_SPECIAUX = Arrays.asList(
             RoleType.INFECT_PERE_LOUPS,
@@ -80,6 +92,7 @@ public class CompositionManager {
             RoleType.ENFANT_SAUVAGE,
             RoleType.IDIOT_VILLAGE,
             RoleType.RENARD,
+            RoleType.ANALYSTE,
             RoleType.DRUIDE
     );
 
@@ -149,6 +162,52 @@ public class CompositionManager {
     }
 
     /**
+     * (Re)charge la liste des rôles désactivés depuis config.yml (compo-manuelle.roles-desactives,
+     * une liste d'identifiants de RoleType). Un identifiant inconnu ou invalide est ignoré
+     * silencieusement (config modifiée à la main avec une typo) plutôt que de bloquer le
+     * chargement du plugin. LOUP_GAROU est toujours filtré de cette liste au chargement : voir le
+     * commentaire sur le champ rolesDesactives.
+     */
+    public void chargerRolesDesactives(List<String> nomsRolesDesactives) {
+        rolesDesactives.clear();
+        if (nomsRolesDesactives == null) {
+            return;
+        }
+        for (String nom : nomsRolesDesactives) {
+            try {
+                RoleType type = RoleType.valueOf(nom.trim().toUpperCase(Locale.ROOT));
+                if (type != RoleType.LOUP_GAROU) {
+                    rolesDesactives.add(type);
+                }
+            } catch (IllegalArgumentException e) {
+                logger.warning("[LGUHC] compo-manuelle.roles-desactives : rôle inconnu \"" + nom + "\" dans config.yml, entrée ignorée.");
+            }
+        }
+    }
+
+    /** Vrai si ce rôle peut être pioché par le calcul automatique (LOUP_GAROU l'est toujours, voir rolesDesactives). */
+    public boolean estActif(RoleType type) {
+        return type == RoleType.LOUP_GAROU || !rolesDesactives.contains(type);
+    }
+
+    /** Active/désactive un rôle pour le calcul automatique. Ignoré pour LOUP_GAROU (toujours actif). Ne persiste rien lui-même : à écrire dans config.yml par l'appelant (voir ConfigMenu). */
+    public void setActif(RoleType type, boolean actif) {
+        if (type == RoleType.LOUP_GAROU) {
+            return;
+        }
+        if (actif) {
+            rolesDesactives.remove(type);
+        } else {
+            rolesDesactives.add(type);
+        }
+    }
+
+    /** Rôles actuellement désactivés du calcul automatique, pour affichage (ex: ConfigMenu) et sauvegarde config.yml. */
+    public Set<RoleType> getRolesDesactives() {
+        return Collections.unmodifiableSet(rolesDesactives);
+    }
+
+    /**
      * Construit la liste "à plat" des rôles à distribuer pour ce nombre de
      * joueurs (mélangée aléatoirement à la fin, l'ordre de construction ne
      * sert qu'à choisir QUELS rôles entrent en jeu). Utilise la composition
@@ -175,6 +234,7 @@ public class CompositionManager {
 
         for (RoleType special : ORDRE_LOUPS_SPECIAUX) {
             if (liste.size() >= nbLoups) break;
+            if (!estActif(special)) continue; // désactivé via /lg config > Compo
             liste.add(special);
         }
         while (liste.size() < nbLoups) {
@@ -184,6 +244,7 @@ public class CompositionManager {
         // --- 2) Village / Hybrides / Solitaire ---
         int placesRestantes = nbJoueursReels - liste.size();
         for (RoleType role : ORDRE_VILLAGE) {
+            if (!estActif(role)) continue; // désactivé via /lg config > Compo
             int cout = (role == RoleType.SOEURS) ? 2 : 1;
             if (cout > placesRestantes) {
                 continue; // pas assez de place pour ce rôle précis, on tente le suivant de la liste

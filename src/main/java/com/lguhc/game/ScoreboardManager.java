@@ -10,6 +10,7 @@ import org.bukkit.scoreboard.Objective;
 import org.bukkit.scoreboard.Scoreboard;
 import org.bukkit.scoreboard.Team;
 import org.bukkit.potion.PotionEffectType;
+import org.bukkit.scoreboard.NameTagVisibility;
 
 import java.util.Map;
 import java.util.UUID;
@@ -152,7 +153,7 @@ public class ScoreboardManager {
             // cible n'est plus sous invisibilité (ce bloc tourne à chaque rafraichissement du
             // scoreboard, donc la transition suit l'effet de potion en temps réel).
             boolean cibleInvisible = cible.getPlayer().hasPotionEffect(PotionEffectType.INVISIBILITY);
-            equipe.setNameTagVisibility(cibleInvisible ? Team.NameTagVisibility.NEVER : Team.NameTagVisibility.ALWAYS);
+            equipe.setNameTagVisibility(cibleInvisible ? NameTagVisibility.NEVER : NameTagVisibility.ALWAYS);
             try {
                 equipe.addPlayer(cible.getPlayer());
             } catch (Exception ignored) {
@@ -171,9 +172,17 @@ public class ScoreboardManager {
         return MARQUEURS[index % MARQUEURS.length] + ChatColor.DARK_GRAY + "------------";
     }
 
+    /**
+     * Distance depuis le centre jusqu'au mur de la bordure, dans une direction donnée (ce que le
+     * "±" affiché au scoreboard est censé représenter). WorldBorder#getSize() renvoie le CÔTÉ
+     * TOTAL du carré (le diamètre) : une bordure réglée à 1000 s'étend de -500 à +500 depuis son
+     * centre. Sans cette division par 2, le scoreboard annonçait "±1000" pour une bordure dont
+     * le mur réel n'est qu'à 500 du centre - c'était un bug d'affichage pur, la WorldBorder
+     * elle-même était toujours correctement dimensionnée.
+     */
     private double tailleBordure(Player joueur) {
         World monde = joueur.getWorld();
-        return monde.getWorldBorder() != null ? monde.getWorldBorder().getSize() : 0;
+        return monde.getWorldBorder() != null ? monde.getWorldBorder().getSize() / 2.0 : 0;
     }
 
     /** Distance horizontale jusqu'à (0,0). L'ancienne direction cardinale (N/NE/E...) a été retirée : son calcul ne donnait pas un résultat fiable. */

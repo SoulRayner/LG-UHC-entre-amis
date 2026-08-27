@@ -13,6 +13,14 @@ commands:
   lw:
     description: Laisser un dernier mot qui s'affichera à votre mort
     usage: /lw <message>
+  helpop:
+    description: Demander de l'aide au staff en privé
+    usage: /helpop <message>
+  host:
+    description: Annonce du staff, bien visible dans le chat
+    usage: /host <message>
+    permission: lguhc.host
+    permission-message: "&cVous n'avez pas la permission de faire ça."
 
 permissions:
   lguhc.host:

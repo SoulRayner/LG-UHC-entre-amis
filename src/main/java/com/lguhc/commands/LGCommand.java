@@ -7,6 +7,7 @@ import com.lguhc.game.GameManager;
 import com.lguhc.game.GamePlayer;
 import com.lguhc.game.RoleType;
 import com.lguhc.roles.loups.LoupPerfideRole;
+import com.lguhc.roles.villageois.AnalysteRole;
 import com.lguhc.roles.villageois.ChasseurRole;
 import com.lguhc.roles.villageois.PetiteFilleRole;
 import com.lguhc.roles.villageois.RenardRole;
@@ -55,6 +56,9 @@ public class LGCommand implements CommandExecutor {
                 if (!verifierHote(sender)) return true;
                 plugin.getGameManager().demarrer(sender);
                 return true;
+            case "config":
+                if (!verifierHote(sender)) return true;
+                return joueurRequis(sender, plugin.getConfigMenu()::ouvrirMenuPrincipal);
             case "stop":
             case "reset":
                 if (!verifierHote(sender)) return true;
@@ -71,12 +75,14 @@ public class LGCommand implements CommandExecutor {
                 return joueurRequis(sender, p -> voyanteVoir(p, args));
             case "flairer":
                 return joueurRequis(sender, p -> renardFlairer(p, args));
+            case "observer":
+                return joueurRequis(sender, p -> analysteObserver(p, args));
+            case "analyser":
+                return joueurRequis(sender, p -> analysteAnalyser(p, args));
             case "ressusciter":
                 return joueurRequis(sender, p -> sorciereRessusciter(p, args));
             case "tirer":
                 return joueurRequis(sender, p -> chasseurTire(p, args));
-            case "loupblanc":
-                return joueurRequis(sender, p -> loupBlanc(p, args));
             case "perfide":
                 return joueurRequis(sender, this::loupPerfide);
             case "espionner":
@@ -85,8 +91,6 @@ public class LGCommand implements CommandExecutor {
                 return joueurRequis(sender, this::loupHurler);
             case "infecter":
                 return joueurRequis(sender, this::infecterPere);
-            case "meute":
-                return joueurRequis(sender, p -> messageMeute(p, args));
             case "couple":
                 return joueurRequis(sender, p -> cupidonLove(p, args));
             case "choisir":
@@ -285,6 +289,112 @@ public class LGCommand implements CommandExecutor {
         }, 20L, 20L);
     }
 
+    private void analysteObserver(Player p, String[] args) {
+        GamePlayer gp = moi(p);
+        if (gp == null || !verifierRole(p, gp, RoleType.ANALYSTE)) return;
+
+        long secondesEcoulees = plugin.getGameManager().getTempsTotalEcouleSecondes();
+        long secondesAvantDispo = AnalysteRole.MINUTES_AVANT_DISPONIBLE * 60L;
+        if (secondesEcoulees < secondesAvantDispo) {
+            long resteMinutes = (secondesAvantDispo - secondesEcoulees + 59) / 60;
+            Msg.envoyer(p, "&cVotre pouvoir d'observation n'est disponible qu'à partir de " + AnalysteRole.MINUTES_AVANT_DISPONIBLE
+                    + " minutes de jeu (encore " + resteMinutes + " min).");
+            return;
+        }
+        if (args.length < 2) {
+            Msg.envoyer(p, "&cUsage : /lg observer <joueur>");
+            return;
+        }
+
+        int utilisations = gp.getEtat(AnalysteRole.CLE_OBSERVATIONS_UTILISEES, 0);
+        if (utilisations >= AnalysteRole.UTILISATIONS_OBSERVATION_MAX) {
+            Msg.envoyer(p, "&cVous avez déjà utilisé vos " + AnalysteRole.UTILISATIONS_OBSERVATION_MAX + " observations.");
+            return;
+        }
+        long derniereObservationTs = gp.getEtat(AnalysteRole.CLE_DERNIERE_OBSERVATION_TS, 0L);
+        long cooldownMs = AnalysteRole.COOLDOWN_OBSERVATION_MINUTES * 60L * 1000L;
+        long depuisDerniere = System.currentTimeMillis() - derniereObservationTs;
+        if (derniereObservationTs > 0 && depuisDerniere < cooldownMs) {
+            long resteSecondes = (cooldownMs - depuisDerniere) / 1000L;
+            Msg.envoyer(p, "&cEncore " + (resteSecondes / 60) + "m" + (resteSecondes % 60) + "s avant de pouvoir observer à nouveau.");
+            return;
+        }
+
+        GamePlayer cibleGP = cible(p, args[1]);
+        if (cibleGP == null || !cibleGP.isVivant() || cibleGP.getPlayer() == null) {
+            Msg.envoyer(p, "&cCible invalide.");
+            return;
+        }
+        if (cibleGP == gp) {
+            Msg.envoyer(p, "&cVous ne pouvez pas vous observer vous-même.");
+            return;
+        }
+
+        List<PotionEffectType> effetsDetectes = new ArrayList<>();
+        for (PotionEffectType type : AnalysteRole.EFFETS_DETECTES) {
+            if (cibleGP.getPlayer().hasPotionEffect(type)) {
+                effetsDetectes.add(type);
+            }
+        }
+        // Liste éventuellement vide mais toujours stockée (non nulle) : c'est ce marqueur qui
+        // autorisera /lg analyser sur cette cible plus tard (voir AnalysteRole.CLE_EFFETS_PREFIXE).
+        gp.setEtat(AnalysteRole.CLE_EFFETS_PREFIXE + cibleGP.getUuid(), effetsDetectes);
+        gp.setEtat(AnalysteRole.CLE_OBSERVATIONS_UTILISEES, utilisations + 1);
+        gp.setEtat(AnalysteRole.CLE_DERNIERE_OBSERVATION_TS, System.currentTimeMillis());
+        gp.setAura(Aura.OBSCURE);
+
+        boolean auMoinsUnEffet = !effetsDetectes.isEmpty();
+        Msg.envoyer(p, "&6🔍 Observation de " + cibleGP.getNom() + " terminée (" + (utilisations + 1) + "/" + AnalysteRole.UTILISATIONS_OBSERVATION_MAX + ") : "
+                + (auMoinsUnEffet ? "&aau moins un effet détecté." : "&7aucun effet détecté."));
+        Msg.envoyer(p, "&7Votre Aura devient &1Obscure&7 : vous venez d'utiliser un pouvoir de détection.");
+    }
+
+    private void analysteAnalyser(Player p, String[] args) {
+        GamePlayer gp = moi(p);
+        if (gp == null || !verifierRole(p, gp, RoleType.ANALYSTE)) return;
+
+        if (gp.getEtat(AnalysteRole.CLE_ANALYSE_UTILISEE, false)) {
+            Msg.envoyer(p, "&cVous avez déjà utilisé votre unique analyse.");
+            return;
+        }
+        if (args.length < 2) {
+            Msg.envoyer(p, "&cUsage : /lg analyser <joueur>");
+            return;
+        }
+        GamePlayer cibleGP = cible(p, args[1]);
+        if (cibleGP == null) return;
+
+        List<PotionEffectType> effets = gp.getEtat(AnalysteRole.CLE_EFFETS_PREFIXE + cibleGP.getUuid(), null);
+        if (effets == null) {
+            Msg.envoyer(p, "&cVous n'avez jamais observé ce joueur : impossible de l'analyser.");
+            return;
+        }
+
+        gp.setEtat(AnalysteRole.CLE_ANALYSE_UTILISEE, true);
+        gp.setAura(Aura.OBSCURE);
+
+        if (effets.isEmpty()) {
+            Msg.envoyer(p, "&6🔬 Analyse de " + cibleGP.getNom() + " : &7aucun effet détecté lors de l'observation.");
+        } else {
+            StringBuilder liste = new StringBuilder();
+            for (int i = 0; i < effets.size(); i++) {
+                if (i > 0) {
+                    liste.append("&7, &f");
+                }
+                liste.append(AnalysteRole.nomFrancais(effets.get(i)));
+            }
+            Msg.envoyer(p, "&6🔬 Analyse de " + cibleGP.getNom() + " : &fil possédait &f" + liste + " &fau moment de l'observation.");
+        }
+
+        Player cibleJoueur = cibleGP.getPlayer();
+        if (cibleJoueur != null) {
+            Msg.envoyer(cibleJoueur, "&6Vous avez été analysé(e) par l'Analyste du Village.");
+            if (cibleGP.getCamp() != Camp.VILLAGE) {
+                Msg.envoyer(cibleJoueur, "&6Son identité vous est révélée : &f" + gp.getNom());
+            }
+        }
+    }
+
     private void sorciereRessusciter(Player p, String[] args) {
         GamePlayer gp = moi(p);
         if (gp == null || !verifierRole(p, gp, RoleType.SORCIERE)) return;
@@ -316,9 +426,26 @@ public class LGCommand implements CommandExecutor {
         cibleJoueur.setGameMode(GameMode.SURVIVAL);
         cibleJoueur.setHealth(cibleJoueur.getMaxHealth());
         cibleJoueur.setWalkSpeed(RenardRole.VITESSE_MARCHE_NORMALE);
-        cibleJoueur.teleport(plugin.getGameManager().emplacementAleatoireDansBordure(cibleJoueur.getWorld()));
+        cibleJoueur.teleport(emplacementRespawnReanimation(cibleJoueur));
         plugin.getDeathManager().restaurerStuff(cibleGP);
         Msg.envoyer(p, "&d✧ Vous avez ressuscité " + cibleGP.getNom() + " !");
+    }
+
+    /**
+     * Point de réapparition d'un joueur réanimé (Sorcière / Infect Père des Loups). Il patiente
+     * au lobby depuis sa mort apparente (voir DeathManager#debuterFenetreMort), donc
+     * cibleJoueur.getWorld() pointe à cet instant sur le monde LOBBY, pas le monde de jeu - on
+     * passe explicitement par GameManager#getMondeJeu(). Toujours autour des coordonnées
+     * globales (0,0) du monde de jeu, 300 blocs maximum, comme demandé (repli sur l'ancien
+     * comportement - un point aléatoire dans toute la bordure - si le monde de jeu n'est
+     * introuvable, ce qui ne devrait normalement jamais arriver en pleine partie).
+     */
+    private org.bukkit.Location emplacementRespawnReanimation(Player cibleJoueur) {
+        org.bukkit.World mondeJeu = plugin.getGameManager().getMondeJeu();
+        if (mondeJeu != null) {
+            return plugin.getGameManager().emplacementAleatoireAutourDuZero(mondeJeu);
+        }
+        return plugin.getGameManager().emplacementAleatoireDansBordure(cibleJoueur.getWorld());
     }
 
     private void chasseurTire(Player p, String[] args) {
@@ -356,36 +483,6 @@ public class LGCommand implements CommandExecutor {
     }
 
     // ================= Pouvoirs Loups =================
-
-    private void loupBlanc(Player p, String[] args) {
-        GamePlayer gp = moi(p);
-        if (gp == null || !verifierRole(p, gp, RoleType.LOUP_GAROU_BLANC)) return;
-        if (!plugin.getGameManager().estNuit()) {
-            Msg.envoyer(p, "&cUniquement la nuit.");
-            return;
-        }
-        if (plugin.getGameManager().getNumeroNuit() % 2 != 0) {
-            Msg.envoyer(p, "&cVotre pouvoir secret n'est disponible qu'une nuit sur deux (prochaine nuit paire).");
-            return;
-        }
-        if (args.length < 2) {
-            Msg.envoyer(p, "&cUsage : /lg loupblanc <joueur>");
-            return;
-        }
-        int nuitActuelle = plugin.getGameManager().getNumeroNuit();
-        if (gp.getEtat("loupblanc_derniere_nuit", -1) == nuitActuelle) {
-            Msg.envoyer(p, "&cDéjà utilisé cette nuit.");
-            return;
-        }
-        GamePlayer cibleGP = cible(p, args[1]);
-        if (cibleGP == null || !cibleGP.isVivant() || cibleGP.getCamp() != Camp.LOUPS || cibleGP == gp) {
-            Msg.envoyer(p, "&cCible invalide (doit être un autre Loup-Garou vivant).");
-            return;
-        }
-        gp.setEtat("loupblanc_derniere_nuit", nuitActuelle);
-        Msg.envoyer(p, "&4Vous dévorez secrètement " + cibleGP.getNom() + "...");
-        plugin.getGameManager().eliminer(cibleGP, "a été dévoré(e) en secret");
-    }
 
     private void loupPerfide(Player p) {
         GamePlayer gp = moi(p);
@@ -605,7 +702,7 @@ public class LGCommand implements CommandExecutor {
         victime.setCorruption(0.0);
         victimeJoueur.setGameMode(GameMode.SURVIVAL);
         victimeJoueur.setHealth(victimeJoueur.getMaxHealth());
-        victimeJoueur.teleport(plugin.getGameManager().emplacementAleatoireDansBordure(victimeJoueur.getWorld()));
+        victimeJoueur.teleport(emplacementRespawnReanimation(victimeJoueur));
         plugin.getDeathManager().restaurerStuff(victime);
 
         if (victime == gp) {
@@ -628,21 +725,6 @@ public class LGCommand implements CommandExecutor {
         // continue indéfiniment alors qu'il ne reste plus que des Loups. Appel systématique (même
         // dans les branches "soi-même"/"allié déjà Loup") : sans effet si rien n'a changé.
         plugin.getGameManager().verifierVictoire();
-    }
-
-    private void messageMeute(Player p, String[] args) {
-        GamePlayer gp = moi(p);
-        if (gp == null) return;
-        if (gp.getCamp() != Camp.LOUPS || !gp.isVivant()) {
-            Msg.envoyer(p, "&cVous n'êtes pas dans le camp des Loups-Garous.");
-            return;
-        }
-        if (args.length < 2) {
-            Msg.envoyer(p, "&cUsage : /lg meute <message>");
-            return;
-        }
-        String message = String.join(" ", java.util.Arrays.copyOfRange(args, 1, args.length));
-        plugin.getGameManager().diffuserAuxLoups("&4[Meute] &c" + gp.getNom() + "&7: &f" + message);
     }
 
     // ================= Hybrides =================
@@ -856,6 +938,15 @@ public class LGCommand implements CommandExecutor {
                 return true;
             }
 
+            case "chat": {
+                boolean nouvelEtat = !gm.isChatDesactive();
+                gm.setChatDesactive(nouvelEtat);
+                Bukkit.broadcastMessage(Msg.c(nouvelEtat
+                        ? "&c&lLe chat vient d'être désactivé par un hôte."
+                        : "&a&lLe chat est de nouveau activé."));
+                return true;
+            }
+
             case "border": {
                 if (args.length < 3) {
                     sender.sendMessage(Msg.c("&cUsage : /lg admin border <taille> &7ou&c /lg admin border start"));
@@ -931,6 +1022,7 @@ public class LGCommand implements CommandExecutor {
         sender.sendMessage(Msg.c("&6/lg admin tp <joueur> &7- vous téléporte vers ce joueur"));
         sender.sendMessage(Msg.c("&6/lg admin border <taille> &7- redimensionne la bordure instantanément"));
         sender.sendMessage(Msg.c("&6/lg admin border start &7- force le début du resserrement progressif (sans attendre le délai normal)"));
+        sender.sendMessage(Msg.c("&6/lg admin chat &7- active/désactive le chat général du serveur (basculeur)"));
     }
 
     // ================= Vote du village =================
@@ -985,13 +1077,24 @@ public class LGCommand implements CommandExecutor {
         if (sauvageTransforme) {
             Msg.envoyer(p, Camp.LOUPS.getCouleur() + "• Transformé : votre modèle est mort, vous êtes désormais Loup-Garou.");
         }
+        // Aura dynamique (ex : Analyste après un /lg observer ou /lg analyser) : gp.getAura()
+        // peut différer de la valeur de départ portée par le rôle (type.getAura(), déjà affichée
+        // ci-dessus dans la carte) - voir RoleType (javadoc en tête de fichier) et AnalysteRole.
+        if (gp.getAura() != type.getAura()) {
+            Msg.envoyer(p, "&7• Aura actuelle : " + gp.getAura().getNomFormate() + "&7 (a changé en cours de partie).");
+        }
         // Couple (les 2 amoureux, et le Cupidon tant que son couple est vivant)
         String campCouple = campAvecCouplePour(gp);
         if ("&dCouple".equals(campCouple)) {
             Msg.envoyer(p, "&7• Statut : &dCouple");
         }
 
-        if (gp.isVivant() && gp.getCamp() == Camp.LOUPS && plugin.getGameManager().isListeLoupsRevelee()) {
+        // Le Loup-Garou Amnésique caché a sa propre mécanique de liste (construite par proximité,
+        // voir GameManager#envoyerListeAlliesLoup / #tickLoupGarouAmnesique), indépendante du
+        // minuteur général de 45 min : il doit pouvoir la consulter via /lg role dès le début,
+        // même avant que isListeLoupsRevelee() ne devienne vrai pour le reste de la meute.
+        boolean amnesiqueCache = gp.getRole() == RoleType.LOUP_GAROU_AMNESIQUE && !gp.getEtat("amnesique_revele", false);
+        if (gp.isVivant() && gp.getCamp() == Camp.LOUPS && (plugin.getGameManager().isListeLoupsRevelee() || amnesiqueCache)) {
             plugin.getGameManager().envoyerListeAlliesLoup(gp);
         }
     }
@@ -1068,10 +1171,13 @@ public class LGCommand implements CommandExecutor {
         sender.sendMessage(Msg.c("&d/lg color [joueur] &7- assigner une couleur personnelle (pour vous seul). Sans argument ou avec \"moi\" : vous colore vous-même"));
         sender.sendMessage(Msg.c("&d/lg groupe <message> &7- parler à votre groupe"));
         sender.sendMessage(Msg.c("&d/lw <message> &7- laisser un dernier mot"));
+        sender.sendMessage(Msg.c("&d/helpop <message> &7- demander de l'aide au staff en privé"));
         if (sender.hasPermission("lguhc.host")) {
+            sender.sendMessage(Msg.c("&6/lg config &7- ouvrir le menu de configuration (composition, règles, bordure...) (hôte)"));
             sender.sendMessage(Msg.c("&6/lg start &7- démarrer la partie (hôte)"));
             sender.sendMessage(Msg.c("&6/lg stop &7- réinitialiser la partie (hôte)"));
             sender.sendMessage(Msg.c("&6/lg admin &7- outils de test (voir /lg admin)"));
+            sender.sendMessage(Msg.c("&6/host <message> &7- annonce serveur bien visible (hôte)"));
         }
         sender.sendMessage(Msg.c("&7Les pouvoirs de rôle apparaissent en jeu une fois votre rôle attribué."));
     }

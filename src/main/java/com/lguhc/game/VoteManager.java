@@ -16,7 +16,8 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Vote du village : 1 vote au début de chaque épisode à partir du 3ème,
+ * Vote du village : 1 vote au début de chaque épisode à partir du 4ème
+ * (soit 60 min de jeu avec la durée d'épisode par défaut de 20 min),
  * dure 2 minutes. Il faut au moins 3 votes sur un même joueur pour qu'il
  * soit sanctionné (le plus voté l'emporte ; égalité -> tirage au sort
  * parmi les joueurs à égalité). Sanction : Poison I pendant 13 secondes,
@@ -26,7 +27,7 @@ import java.util.UUID;
 public class VoteManager {
 
     private boolean actif = true;
-    private int episodePremierVote = 3;
+    private int episodePremierVote = 4;
     private long dureeSecondes = 120;
     private static final int VOTES_MINIMUM = 3;
     private static final int DUREE_POISON_SECONDES = 13;
@@ -41,7 +42,7 @@ public class VoteManager {
             return;
         }
         actif = section.getBoolean("active", true);
-        episodePremierVote = section.getInt("episode-premier-vote", 3);
+        episodePremierVote = section.getInt("episode-premier-vote", 4);
         dureeSecondes = section.getLong("duree-secondes", 120);
     }
 

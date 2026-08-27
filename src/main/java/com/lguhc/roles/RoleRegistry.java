@@ -4,11 +4,13 @@ import com.lguhc.game.RoleType;
 import com.lguhc.roles.hybrides.CupidonRole;
 import com.lguhc.roles.hybrides.EnfantSauvageRole;
 import com.lguhc.roles.loups.InfectPereDesLoupsRole;
+import com.lguhc.roles.loups.LoupGarouAmnesiqueRole;
 import com.lguhc.roles.loups.LoupGarouBlancRole;
 import com.lguhc.roles.loups.LoupGarouRole;
 import com.lguhc.roles.loups.LoupMystiqueRole;
 import com.lguhc.roles.loups.LoupPerfideRole;
 import com.lguhc.roles.solitaires.AssassinRole;
+import com.lguhc.roles.villageois.AnalysteRole;
 import com.lguhc.roles.villageois.AncienRole;
 import com.lguhc.roles.villageois.ChasseurRole;
 import com.lguhc.roles.villageois.DruideRole;
@@ -38,12 +40,14 @@ public class RoleRegistry {
         enregistrer(new IdiotDuVillageRole());
         enregistrer(new AncienRole());
         enregistrer(new SoeursRole());
+        enregistrer(new AnalysteRole());
 
         enregistrer(new LoupGarouRole());
         enregistrer(new InfectPereDesLoupsRole());
         enregistrer(new LoupGarouBlancRole());
         enregistrer(new LoupPerfideRole());
         enregistrer(new LoupMystiqueRole());
+        enregistrer(new LoupGarouAmnesiqueRole());
 
         enregistrer(new CupidonRole());
         enregistrer(new EnfantSauvageRole());

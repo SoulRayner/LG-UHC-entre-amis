@@ -2,6 +2,7 @@ package com.lguhc.roles.villageois;
 
 import com.lguhc.LGUHCPlugin;
 import com.lguhc.game.Aura;
+import com.lguhc.game.Camp;
 import com.lguhc.game.GamePlayer;
 import com.lguhc.game.RoleType;
 import com.lguhc.roles.Role;
@@ -52,10 +53,15 @@ public class MontreurDOursRole implements Role {
             // de son rôle d'origine (souvent Lumineuse) mais est un vrai Loup-Garou tout comme lui :
             // il doit donc aussi faire grogner l'ours, même si son Aura ne le montre pas. Le Loup
             // Mystique reste bien exclu ici (ni Aura Obscure, ni "infecté").
-            boolean estSombreDetectable = autre.getAura() == Aura.OBSCURE || autre.getEtat("infecte", false);
-            if (!estSombreDetectable) {
-                continue;
+            boolean estSombre = autre.getAura() == Aura.OBSCURE;
+            boolean estinfecter = autre.getEtat("infecte", false);
+            boolean estUnLoup = autre.getCamp() == Camp.LOUPS;
+
+
+            if (!estUnLoup && (!estSombre || !estinfecter) ) {
+                continue; // on skip
             }
+
             Player autreJoueur = autre.getPlayer();
             if (autreJoueur == null || !autreJoueur.getWorld().equals(joueur.getWorld())) {
                 continue;

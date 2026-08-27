@@ -16,10 +16,12 @@ import org.bukkit.potion.PotionEffectType;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -64,9 +66,20 @@ public class GameManager {
      */
     private long ticksEcoulesDansPhase = 0L;
 
-    /** Délai (en secondes de jeu réel, depuis le lancement de la partie) avant la révélation de la liste des alliés Loups. */
-    public static final long DELAI_REVELATION_LISTE_LOUPS_SECONDES = 2700L; // 45 minutes
     private boolean listeLoupsRevelee = false;
+
+    /** Chat général désactivé PAR DÉFAUT (un hôte le réactive avec /lg admin chat), voir ChatToggleListener. Etat volatile (non persisté dans config.yml) : redevient désactivé à chaque redémarrage du plugin. */
+    private boolean chatDesactive = true;
+
+    /**
+     * Délai (en secondes de jeu réel, depuis le lancement de la partie) avant la révélation de la
+     * liste des alliés Loups. Réglable via /lg config > Règle (survie-uhc.minutes-avant-liste-loups,
+     * 45 min par défaut) — anciennement une constante figée en dur (2700L), désormais lue à chaque
+     * appel dans tickMinuteriesAutomatiques() (1x/s, coût négligeable).
+     */
+    public long getDelaiRevelationListeLoupsSecondes() {
+        return plugin.getConfig().getLong("survie-uhc.minutes-avant-liste-loups", 45) * 60L;
+    }
 
     /** Délai de grâce accordé à un joueur qui se déconnecte en pleine partie avant d'être éliminé définitivement (un simple crash ne doit pas coûter la partie). */
     private static final long DELAI_GRACE_DECONNEXION_SECONDES = 2 * 60L;
@@ -76,6 +89,41 @@ public class GameManager {
      * Voir surDeconnexion() / surReconnexion() / tickDeconnexions().
      */
     private final Map<UUID, Long> echeancesDeconnexion = new LinkedHashMap<>();
+
+    /** Durée du gel de préparation (immobilité + Blindness + compte à rebours en Title) juste après /lg start, avant le vrai début de partie. */
+    private static final int DUREE_GEL_DEBUT_SECONDES = 10;
+    /** Durée de l'invincibilité générale accordée à tous les joueurs au vrai début de partie (voir veritableDebutPartie() / tickInvincibiliteDebut()). */
+    private static final long DUREE_INVINCIBILITE_DEBUT_SECONDES = 5 * 60L;
+    /** Horodatage réel (System.currentTimeMillis()) du début de l'invincibilité de début de partie, 0 si aucune partie n'est en cours. */
+    private long debutInvincibiliteTimestamp = 0L;
+    /** Dernière minute écoulée pour laquelle un rappel a déjà été envoyé dans le chat (0 à 5), voir tickInvincibiliteDebut(). */
+    private int dernierRappelInvincibiliteMinute = 0;
+
+    /**
+     * Horodatages (secondes de jeu réel écoulées depuis /lg start, voir getTempsTotalEcouleSecondes())
+     * auxquels le 1er/2e événement aléatoire (Exposed / Exposé Inversé) doit se déclencher, tirés
+     * au sort une seule fois au vrai début de partie (voir veritableDebutPartie()) dans les fenêtres
+     * réglées par EvenementAleatoireManager. -1 si Exposed ET Exposé Inversé sont tous deux
+     * désactivés (ou si aucune partie n'est en cours) : voir tickMinuteriesAutomatiques() pour le
+     * déclenchement.
+     */
+    private long secondesPremierEvenementAleatoire = -1L;
+    private long secondesSecondEvenementAleatoire = -1L;
+    private boolean premierEvenementAleatoireDeclenche = false;
+    private boolean secondEvenementAleatoireDeclenche = false;
+
+    /**
+     * Horodatage de la fenêtre (unique, contrairement à Exposed/Exposé Inversé ci-dessus) de
+     * l'événement Rumeurs, tiré une seule fois au vrai début de partie si
+     * EvenementAleatoireManager#isRumeursActif(). -1 si désactivé (ou si aucune partie en cours).
+     */
+    private long secondesRumeursAleatoire = -1L;
+    private boolean rumeursAleatoireDeclenche = false;
+    /** Vrai pendant les EvenementAleatoireManager.RUMEURS_DUREE_COLLECTE_SECONDES de collecte des messages (voir declencherRumeurs()/cloturerRumeurs()) : RumeursListener n'intercepte le chat que pendant cette fenêtre. */
+    private boolean collecteRumeursActive = false;
+    /** UUID des joueurs ayant déjà envoyé leur message pendant la fenêtre de collecte en cours - un seul message pris en compte par joueur (voir enregistrerMessageRumeur()). */
+    private final Set<UUID> joueursAyantEnvoyeRumeur = new HashSet<>();
+    private final List<String> messagesRumeursCollectes = new ArrayList<>();
 
     public GameManager(LGUHCPlugin plugin) {
         this.plugin = plugin;
@@ -146,6 +194,20 @@ public class GameManager {
         double rayon = Math.min(rayonConfig, demiTailleBordure * 0.8);
         plugin.getBorderManager().initialiser(monde, centreMonde);
 
+        // Spawn "en couronne" : si monde.distance-spawn-min > 0 (réglable via /lg config > Map,
+        // par pas de 100), les joueurs apparaissent à une distance tirée entre cette valeur et
+        // +100 blocs, au lieu d'être répartis sur tout le disque [0, rayon] comme d'habitude
+        // (ex : distance-spawn-min = 700 => joueurs entre 700 et 800 blocs du centre).
+        // 0 (défaut) = comportement classique inchangé, voir emplacementAleatoireDansRayon.
+        // La couronne est bornée à 90% du rayon de bordure de départ pour ne jamais poser un
+        // joueur hors bordure (ou juste avant son premier resserrement) sur une petite bordure.
+        double distanceSpawnMin = plugin.getConfig().getDouble("monde.distance-spawn-min", 0);
+        double distanceSpawnMax = 0;
+        if (distanceSpawnMin > 0) {
+            distanceSpawnMax = Math.min(distanceSpawnMin + 100.0, demiTailleBordure * 0.9);
+            distanceSpawnMin = Math.min(distanceSpawnMin, Math.max(0.0, distanceSpawnMax - 10.0));
+        }
+
         monde.setGameRuleValue("doMobSpawning", "false");
         // Indispensable : sans ça, l'horloge vanilla avance toute seule en parallèle du setTime()
         // de tickCycleJourNuit() et lui fait concurrence, ce qui rend le cycle jour/nuit erratique.
@@ -176,12 +238,73 @@ public class GameManager {
             p.getInventory().addItem(new org.bukkit.inventory.ItemStack(org.bukkit.Material.FEATHER, 16));
             p.getInventory().addItem(new org.bukkit.inventory.ItemStack(org.bukkit.Material.STRING, 6));
             p.getInventory().addItem(new org.bukkit.inventory.ItemStack(org.bukkit.Material.COOKED_BEEF, 64));
-            Location depart = emplacementAleatoireDansRayon(monde, centreMonde, rayon);
+            Location depart = distanceSpawnMin > 0
+                    ? emplacementAleatoireEnCouronne(monde, centreMonde, distanceSpawnMin, distanceSpawnMax)
+                    : emplacementAleatoireDansRayon(monde, centreMonde, rayon);
             p.teleport(depart);
             gp.setVivant(true);
             gp.setDroitDeVote(true);
         }
 
+        // Avant que la partie ne débute réellement (épisode 1, minuteries, invincibilité...), on
+        // gèle tout le monde sur place, aveuglé, pendant quelques secondes (voir
+        // demarrerCompteAReboursDebut ci-dessous). episodeActuel/phase/debutPartieTimestamp ne
+        // sont positionnés qu'à l'issue de ce délai, dans veritableDebutPartie().
+        for (GamePlayer gp : joueurs.values()) {
+            gp.setEtat("gel_debut_actif", true);
+        }
+        demarrerCompteAReboursDebut(DUREE_GEL_DEBUT_SECONDES);
+    }
+
+    /**
+     * Compte à rebours de préparation (10 secondes par défaut, voir DUREE_GEL_DEBUT_SECONDES)
+     * affiché en Title au centre de l'écran. Pendant ce délai les joueurs sont figés sur place
+     * (immobilité gérée par UHCRulesListener#surMouvementGelDebut, piloté par le flag d'état
+     * "gel_debut_actif") et aveuglés (Blindness). Utilise un compteur de TICKS classique - et non
+     * l'horloge réelle comme ailleurs dans cette classe (voir demarrer()) - car sur une durée
+     * aussi courte la dérive liée au lag est négligeable, contrairement aux minuteries de
+     * plusieurs minutes/dizaines de minutes qui, elles, doivent absolument s'appuyer sur
+     * System.currentTimeMillis().
+     */
+    private void demarrerCompteAReboursDebut(int secondesRestantes) {
+        if (secondesRestantes <= 0) {
+            terminerCompteAReboursDebut();
+            return;
+        }
+        for (GamePlayer gp : joueurs.values()) {
+            Player p = gp.getPlayer();
+            if (p == null) {
+                continue;
+            }
+            // Durée de Blindness volontairement plus longue que l'intervalle (25s pour un tick
+            // toutes les 1s) : simple garde-fou pour ne jamais laisser un "trou" sans cécité entre
+            // deux appels si le serveur a un léger à-coup.
+            p.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 25 * 20, 0, false, false));
+            p.sendTitle(Msg.c("&e&l" + secondesRestantes), Msg.c("&7Préparez-vous..."));
+        }
+        Bukkit.getScheduler().runTaskLater(plugin, () -> demarrerCompteAReboursDebut(secondesRestantes - 1), 20L);
+    }
+
+    /** Fin du gel de préparation : dégèle et rend la vue à tout le monde, puis lance vraiment la partie. */
+    private void terminerCompteAReboursDebut() {
+        for (GamePlayer gp : joueurs.values()) {
+            gp.setEtat("gel_debut_actif", false);
+            Player p = gp.getPlayer();
+            if (p == null) {
+                continue;
+            }
+            p.removePotionEffect(PotionEffectType.BLINDNESS);
+            p.sendTitle(Msg.c("&a&lGO !"), Msg.c("&fLa partie commence !"));
+        }
+        veritableDebutPartie();
+    }
+
+    /**
+     * Vrai lancement de la partie (temps de jeu réel, épisode 1, minuteries, invincibilité de
+     * début...). Appelé uniquement à l'issue du gel de préparation ci-dessus - c'est ici, et non
+     * dans demarrer(), que la partie "commence" au sens des règles (PvP, rôles, minuteries).
+     */
+    private void veritableDebutPartie() {
         episodeActuel = 1;
         debutPartieTimestamp = System.currentTimeMillis();
         phase = GamePhase.EPISODE_1;
@@ -206,6 +329,46 @@ public class GameManager {
         // via runTaskLater(ticks) - voir tickMinuteriesAutomatiques(), qui la déclenche sur la
         // même base de temps réel que le reste (même piège de dérive sous lag que celui déjà
         // documenté juste au-dessus pour les rôles et la bordure).
+
+        // Invincibilité générale de début de partie (5 minutes par défaut, voir
+        // DUREE_INVINCIBILITE_DEBUT_SECONDES) : couvre TOUS les types de dégâts (PvP, chute,
+        // lave, mobs...) via estProtege(), vérifié dans UHCRulesListener#surDegatsGeneraux. Les
+        // rappels 1x/minute dans le chat sont gérés par tickInvincibiliteDebut().
+        this.debutInvincibiliteTimestamp = System.currentTimeMillis();
+        this.dernierRappelInvincibiliteMinute = 0;
+        long finInvincibiliteDebut = debutInvincibiliteTimestamp + (DUREE_INVINCIBILITE_DEBUT_SECONDES * 1000L);
+        for (GamePlayer gp : joueurs.values()) {
+            gp.setEtat("invincible_jusqua", finInvincibiliteDebut);
+        }
+        diffuser("&a&l✦ Invincibilité activée pour les " + (DUREE_INVINCIBILITE_DEBUT_SECONDES / 60L) + " premières minutes de jeu !");
+
+        // Événements aléatoires (Exposed / Exposé Inversé) : les 2 horaires sont tirés une seule
+        // fois ici (comme le couple aléatoire de Cupidon ci-dessus), puis comparés au temps réel
+        // écoulé dans tickMinuteriesAutomatiques() - voir EvenementAleatoireManager pour les
+        // fenêtres par défaut (60-80 min / 100-120 min). Programmés dès que l'un des deux est
+        // actif (isExposeOuInverseActif()) : declencherEvenementAleatoire() se chargera de ne
+        // faire jouer que celui (ou ceux) réellement activé(s) à chaque horaire.
+        if (plugin.getEvenementAleatoireManager().isExposeOuInverseActif()) {
+            this.secondesPremierEvenementAleatoire = plugin.getEvenementAleatoireManager().tirerDelaiPremierEvenementSecondes(random);
+            this.secondesSecondEvenementAleatoire = plugin.getEvenementAleatoireManager().tirerDelaiSecondEvenementSecondes(random);
+        } else {
+            this.secondesPremierEvenementAleatoire = -1L;
+            this.secondesSecondEvenementAleatoire = -1L;
+        }
+        this.premierEvenementAleatoireDeclenche = false;
+        this.secondEvenementAleatoireDeclenche = false;
+
+        // Rumeurs : événement indépendant d'Exposed/Exposé Inversé, avec son propre toggle et sa
+        // propre fenêtre unique (défaut 80-120 min) - voir EvenementAleatoireManager.
+        if (plugin.getEvenementAleatoireManager().isRumeursActif()) {
+            this.secondesRumeursAleatoire = plugin.getEvenementAleatoireManager().tirerDelaiRumeursSecondes(random);
+        } else {
+            this.secondesRumeursAleatoire = -1L;
+        }
+        this.rumeursAleatoireDeclenche = false;
+        this.collecteRumeursActive = false;
+        this.joueursAyantEnvoyeRumeur.clear();
+        this.messagesRumeursCollectes.clear();
     }
 
     /**
@@ -242,8 +405,30 @@ public class GameManager {
         // temps réellement écoulé plutôt que programmée en ticks (voir demarrer()). revelerListeLoups()
         // est idempotente (gardée par listeLoupsRevelee), donc rester dans cette condition un peu
         // trop longtemps après le déclenchement ne pose pas de problème.
-        if (!listeLoupsRevelee && ecouleSecondes >= DELAI_REVELATION_LISTE_LOUPS_SECONDES) {
+        if (!listeLoupsRevelee && ecouleSecondes >= getDelaiRevelationListeLoupsSecondes()) {
             revelerListeLoups();
+        }
+
+        // Événements aléatoires (Exposed / Exposé Inversé) : mêmes raisons que ci-dessus (temps
+        // réel plutôt que ticks programmés). Chaque déclenchement est gardé par son propre drapeau
+        // *Declenche, donc rester dans la condition un peu trop longtemps après coup ne pose pas
+        // de problème (idempotent).
+        if (secondesPremierEvenementAleatoire >= 0 && !premierEvenementAleatoireDeclenche
+                && ecouleSecondes >= secondesPremierEvenementAleatoire) {
+            premierEvenementAleatoireDeclenche = true;
+            declencherEvenementAleatoire();
+        }
+        if (secondesSecondEvenementAleatoire >= 0 && !secondEvenementAleatoireDeclenche
+                && ecouleSecondes >= secondesSecondEvenementAleatoire) {
+            secondEvenementAleatoireDeclenche = true;
+            declencherEvenementAleatoire();
+        }
+
+        // Rumeurs : même principe, fenêtre unique et indépendante des 2 ci-dessus.
+        if (secondesRumeursAleatoire >= 0 && !rumeursAleatoireDeclenche
+                && ecouleSecondes >= secondesRumeursAleatoire) {
+            rumeursAleatoireDeclenche = true;
+            declencherRumeurs();
         }
 
         // Transitions Jour -> Nuit -> Jour : mêmes raisons que ci-dessus (voir le commentaire dans
@@ -282,6 +467,229 @@ public class GameManager {
         Msg.envoyer(cupidon.getPlayer(), "&d✧ Vous n'avez formé aucun couple à temps : le destin en a choisi un pour vous, et vous en êtes informé : &f" + a.getNom() + " &d& &f" + b.getNom());
     }
 
+    // ================= Événements aléatoires (Exposed / Exposé Inversé) =================
+
+    /**
+     * Appelée aux 2 horaires tirés dans veritableDebutPartie() (voir tickMinuteriesAutomatiques()).
+     * Détermine lequel des 2 événements survient en fonction des toggles indépendants
+     * d'EvenementAleatoireManager (voir la demande d'origine : activer l'un sans forcément activer
+     * l'autre) :
+     *  - Si les deux sont actifs, tirage 50/50 - sauf si Exposé Inversé n'est pas jouable (il lui
+     *    faut un nombre minimum de joueurs vivants distincts, réglable via
+     *    EvenementAleatoireManager#getExposeInverseJoueursMinimum(), 5 par défaut - voir
+     *    declencherExposeInverse()), auquel cas on retombe sur Exposed, qui ne nécessite qu'un
+     *    seul joueur vivant.
+     *  - Si un seul des deux est actif, c'est toujours lui qui joue à cet horaire (sous réserve,
+     *    pour Exposé Inversé seul, d'avoir ce nombre minimum de joueurs vivants - sinon rien ne se
+     *    passe cette fois).
+     * Ne devrait pas être appelée si aucun des deux n'est actif : les 2 horaires ne sont programmés
+     * dans veritableDebutPartie() que si isExposeOuInverseActif() est vrai.
+     */
+    private void declencherEvenementAleatoire() {
+        if (!estEnCours()) {
+            return;
+        }
+        List<GamePlayer> vivants = getJoueursVivants();
+        if (vivants.isEmpty()) {
+            return;
+        }
+        EvenementAleatoireManager mgr = plugin.getEvenementAleatoireManager();
+        boolean exposeOk = mgr.isExposeActif();
+        boolean inverseOk = mgr.isExposeInverseActif() && vivants.size() >= mgr.getExposeInverseJoueursMinimum();
+
+        if (exposeOk && inverseOk) {
+            if (random.nextBoolean()) {
+                declencherExposeInverse(vivants);
+            } else {
+                declencherExpose(vivants);
+            }
+        } else if (inverseOk) {
+            declencherExposeInverse(vivants);
+        } else if (exposeOk) {
+            declencherExpose(vivants);
+        }
+        // Ni l'un ni l'autre jouable à cet horaire (ex : seul Exposé Inversé actif mais moins de 5
+        // vivants) : rien ne se passe, tant pis pour cette fenêtre.
+    }
+
+    /**
+     * Événement "Exposed" : un joueur vivant tiré au sort voit son pseudo annoncé dans le chat
+     * général à côté de 4 rôles - le sien (toujours inclus), un rôle d'un camp différent du sien,
+     * et deux rôles supplémentaires tirés au hasard. Les 4 rôles sont distincts, et au moins 2
+     * d'entre eux sont des rôles du camp Village (Cupidon/Enfant Sauvage inclus, comme partout
+     * ailleurs dans le code - voir compterVivants(Camp.VILLAGE)). Voir tirerRolesExpose() pour le
+     * détail de la pioche.
+     */
+    private void declencherExpose(List<GamePlayer> vivants) {
+        GamePlayer cible = vivants.get(random.nextInt(vivants.size()));
+        List<RoleType> roles = tirerRolesExpose(cible, vivants);
+        diffuser("&d&l✦ EXPOSED &d: &f" + cible.getNom() + " &7pourrait être... " + formaterRoles(roles));
+    }
+
+    /**
+     * Construit la liste des 4 rôles affichés par declencherExpose(). Piochés en priorité parmi
+     * les rôles actuellement détenus par des joueurs vivants (même principe que l'annonce de
+     * sanction du vote : "4 rôles tirés au sort parmi les vivants"), pour rester cohérent avec ce
+     * que les autres joueurs peuvent réellement observer en jeu. Si ce pool est trop restreint
+     * pour garantir les contraintes ci-dessous (très peu de joueurs restants en fin de partie), il
+     * est élargi à toute la composition utilisée cette partie (compositionUtilisee).
+     */
+    private List<RoleType> tirerRolesExpose(GamePlayer cible, List<GamePlayer> vivants) {
+        List<RoleType> pool = vivants.stream().map(GamePlayer::getRole).distinct().collect(Collectors.toList());
+        if (pool.size() < 4) {
+            for (RoleType type : compositionUtilisee) {
+                if (!pool.contains(type)) {
+                    pool.add(type);
+                }
+            }
+        }
+
+        List<RoleType> selection = new ArrayList<>();
+        RoleType roleCible = cible.getRole();
+        selection.add(roleCible);
+
+        // Un rôle d'un camp différent du sien.
+        List<RoleType> autreCamp = pool.stream()
+                .filter(t -> t.getCampDepart() != roleCible.getCampDepart() && !selection.contains(t))
+                .collect(Collectors.toList());
+        java.util.Collections.shuffle(autreCamp, random);
+        if (!autreCamp.isEmpty()) {
+            selection.add(autreCamp.get(0));
+        }
+
+        // Complète jusqu'à 4 rôles, en garantissant au moins 2 Villageois au total : d'abord les
+        // slots manquants avec des rôles Village (si dispo), puis le reste au hasard.
+        long villageoisActuels = selection.stream().filter(t -> t.getCampDepart() == Camp.VILLAGE).count();
+        int villageoisManquants = (int) Math.max(0, 2 - villageoisActuels);
+
+        List<RoleType> restant = new ArrayList<>(pool);
+        restant.removeAll(selection);
+        java.util.Collections.shuffle(restant, random);
+
+        for (RoleType type : restant) {
+            if (selection.size() >= 4) {
+                break;
+            }
+            if (villageoisManquants > 0 && type.getCampDepart() == Camp.VILLAGE) {
+                selection.add(type);
+                villageoisManquants--;
+            }
+        }
+        for (RoleType type : restant) {
+            if (selection.size() >= 4) {
+                break;
+            }
+            if (!selection.contains(type)) {
+                selection.add(type);
+            }
+        }
+        return selection;
+    }
+
+    private String formaterRoles(List<RoleType> roles) {
+        return roles.stream().map(RoleType::getNomFormate).collect(Collectors.joining("&7, "));
+    }
+
+    /**
+     * Événement "Exposed Inversé" : un nombre réglable de joueurs vivants tirés au sort (sans
+     * doublon, voir EvenementAleatoireManager#getExposeInverseJoueursMinimum(), 5 par défaut) sont
+     * tous affichés dans le chat général à côté du MÊME rôle - un rôle réellement détenu par l'un
+     * d'entre eux (l'unique "vrai", les autres servent de leurre). Contrairement à Exposed, le
+     * rôle affiché n'est donc jamais un pur mensonge : il correspond toujours à au moins un des
+     * joueurs montrés, ce qui laisse une vraie piste à exploiter (juste noyée dans le bruit).
+     * Nécessite au moins ce même nombre de joueurs vivants (vérifié par l'appelant,
+     * declencherEvenementAleatoire()) : c'est ce qui garantit qu'on peut toujours en tirer autant
+     * sans doublon ci-dessous.
+     */
+    private void declencherExposeInverse(List<GamePlayer> vivants) {
+        int nombreJoueurs = plugin.getEvenementAleatoireManager().getExposeInverseJoueursMinimum();
+        List<GamePlayer> tires = new ArrayList<>(vivants);
+        java.util.Collections.shuffle(tires, random);
+        List<GamePlayer> cibles = new ArrayList<>(tires.subList(0, Math.min(nombreJoueurs, tires.size())));
+
+        GamePlayer porteur = cibles.get(random.nextInt(cibles.size()));
+        RoleType roleAffiche = porteur.getRole();
+
+        String noms = cibles.stream().map(GamePlayer::getNom).collect(Collectors.joining("&7, &f"));
+        diffuser("&d&l✦ EXPOSED INVERSÉ &d: &fl'un de ces joueurs est " + roleAffiche.getNomFormate()
+                + "&7 : &f" + noms);
+    }
+
+    // ================= Événement aléatoire : Rumeurs =================
+
+    /**
+     * Événement "Rumeurs" (déclenché à l'horaire tiré dans veritableDebutPartie(), voir
+     * tickMinuteriesAutomatiques()) : contrairement à Exposed/Exposé Inversé (annonce immédiate),
+     * celui-ci ouvre une fenêtre de EvenementAleatoireManager.RUMEURS_DUREE_COLLECTE_SECONDES
+     * secondes pendant laquelle chaque message envoyé dans le chat général par un joueur de la
+     * partie est intercepté par RumeursListener (jamais diffusé tel quel, jamais attribué - voir
+     * enregistrerMessageRumeur()) puis, la fenêtre passée, réaffiché par cloturerRumeurs()
+     * anonymement et dans un ordre mélangé.
+     */
+    private void declencherRumeurs() {
+        if (!estEnCours()) {
+            return;
+        }
+        joueursAyantEnvoyeRumeur.clear();
+        messagesRumeursCollectes.clear();
+        collecteRumeursActive = true;
+        int dureeSecondes = EvenementAleatoireManager.RUMEURS_DUREE_COLLECTE_SECONDES;
+        diffuser("&d&l✦ RUMEURS &d: &fVous avez " + dureeSecondes + " secondes pour envoyer un message dans le chat...");
+        Bukkit.getScheduler().runTaskLater(plugin, this::cloturerRumeurs, dureeSecondes * 20L);
+    }
+
+    /**
+     * Fin de la fenêtre de collecte de Rumeurs : coupe l'interception (collecteRumeursActive passe
+     * à false, donc RumeursListener laisse à nouveau passer le chat normalement), puis diffuse les
+     * messages collectés anonymement et dans un ordre mélangé (Collections.shuffle) - jamais dans
+     * l'ordre d'envoi, pour ne pas laisser deviner qui a parlé en premier/dernier.
+     */
+    private void cloturerRumeurs() {
+        collecteRumeursActive = false;
+        List<String> messages = new ArrayList<>(messagesRumeursCollectes);
+        messagesRumeursCollectes.clear();
+        joueursAyantEnvoyeRumeur.clear();
+        if (!estEnCours()) {
+            return;
+        }
+        if (messages.isEmpty()) {
+            diffuser("&d&l✦ RUMEURS &d: &7Personne n'a envoyé de message...");
+            return;
+        }
+        java.util.Collections.shuffle(messages, random);
+        diffuser("&d&l✦ RUMEURS &d: &7Voici les messages reçus, anonymement et dans le désordre :");
+        for (String message : messages) {
+            diffuser("&d  » &f" + message);
+        }
+    }
+
+    /** Vrai pendant la fenêtre de collecte de l'événement Rumeurs - consulté par RumeursListener pour savoir s'il doit intercepter le chat général. */
+    public boolean isCollecteRumeursActive() {
+        return collecteRumeursActive;
+    }
+
+    /**
+     * Enregistre le message d'un joueur pour l'annonce anonyme de fin de fenêtre Rumeurs. Appelée
+     * par RumeursListener (sur le thread principal, voir sa doc - AsyncPlayerChatEvent est
+     * asynchrone). Ignoré si la fenêtre de collecte n'est plus active (message arrivé trop tard) ou
+     * si ce joueur a déjà un message enregistré cette fenêtre-ci (un seul message pris en compte
+     * par joueur, comme annoncé : "vous avez 20 secondes pour envoyer UN message").
+     */
+    public void enregistrerMessageRumeur(UUID uuid, String message) {
+        if (!collecteRumeursActive) {
+            return;
+        }
+        if (!joueursAyantEnvoyeRumeur.add(uuid)) {
+            return;
+        }
+        messagesRumeursCollectes.add(assainirMessageRumeur(message));
+    }
+
+    /** Retire les codes couleur ('&'/'§') du message d'un joueur avant de le remettre dans le chat via diffuser() : sans ça, un joueur pourrait injecter n'importe quel formatage (voire se faire deviner via une couleur trop reconnaissable) dans l'annonce censée être anonyme. */
+    private String assainirMessageRumeur(String message) {
+        return message.replace('§', ' ').replace('&', ' ').trim();
+    }
+
     /**
      * Détermine le centre de la partie (téléportation de départ + centre de
      * la bordure). Si `monde.centre-x` / `monde.centre-z` sont définis dans
@@ -303,7 +711,33 @@ public class GameManager {
         double distance = random.nextDouble() * rayon;
         double x = centre.getX() + Math.cos(angle) * distance;
         double z = centre.getZ() + Math.sin(angle) * distance;
-        int y = monde.getHighestBlockYAt((int) x, (int) z) + 1;
+        // (int) tronque vers zéro, pas vers le bas : pour x/z négatifs (la moitié des cas,
+        // le rayon de téléportation s'étendant dans toutes les directions autour du centre),
+        // ça interrogeait la colonne de bloc VOISINE au lieu de la bonne, avec une hauteur de
+        // terrain potentiellement différente (trou, ravin...) => joueur posé en l'air, sans
+        // sol sous les pieds, qui tombe pendant que le gel de préparation le fige en boucle.
+        int bx = (int) Math.floor(x);
+        int bz = (int) Math.floor(z);
+        int y = monde.getHighestBlockYAt(bx, bz) + 1;
+        return new Location(monde, x, y, z);
+    }
+
+    /**
+     * Comme emplacementAleatoireDansRayon ci-dessus, mais la distance est tirée dans
+     * [distanceMin, distanceMax] (couronne) au lieu de [0, rayon] (disque plein). Utilisé
+     * quand monde.distance-spawn-min > 0 (voir demarrer()) pour forcer un espacement minimum
+     * entre le centre de la carte et les joueurs au lancement de la partie.
+     */
+    private Location emplacementAleatoireEnCouronne(World monde, Location centre, double distanceMin, double distanceMax) {
+        double angle = random.nextDouble() * Math.PI * 2;
+        double distance = distanceMin + random.nextDouble() * (distanceMax - distanceMin);
+        double x = centre.getX() + Math.cos(angle) * distance;
+        double z = centre.getZ() + Math.sin(angle) * distance;
+        // Même précaution que emplacementAleatoireDansRayon : Math.floor() et non (int), pour ne
+        // pas interroger la mauvaise colonne de bloc sur des coordonnées négatives.
+        int bx = (int) Math.floor(x);
+        int bz = (int) Math.floor(z);
+        int y = monde.getHighestBlockYAt(bx, bz) + 1;
         return new Location(monde, x, y, z);
     }
 
@@ -318,12 +752,32 @@ public class GameManager {
         double demiTaille = bordure.getSize() / 2.0;
         double x = centre.getX() + (random.nextDouble() * 2.0 - 1.0) * demiTaille;
         double z = centre.getZ() + (random.nextDouble() * 2.0 - 1.0) * demiTaille;
-        int y = monde.getHighestBlockYAt((int) x, (int) z) + 1;
+        // Même bug de troncature que emplacementAleatoireDansRayon() ci-dessus, voir son
+        // commentaire : (int) au lieu de Math.floor() sur des coordonnées négatives interroge
+        // la mauvaise colonne de bloc et peut poser le joueur au-dessus du vide.
+        int bx = (int) Math.floor(x);
+        int bz = (int) Math.floor(z);
+        int y = monde.getHighestBlockYAt(bx, bz) + 1;
         return new Location(monde, x, y, z);
     }
 
-    private World getMondeJeu() {
+    /** Public : aussi utilisé par LGCommand pour réanimer un joueur DANS le monde de jeu (voir
+     * emplacementAleatoireAutourDuZero ci-dessous), alors que ce joueur patiente au lobby depuis
+     * sa mort apparente et que son Player#getWorld() actuel pointe donc sur le monde lobby. */
+    public World getMondeJeu() {
         return Bukkit.getWorld(plugin.getConfig().getString("monde.nom", "world"));
+    }
+
+    /**
+     * Position aléatoire dans le monde de jeu, à 300 blocs maximum des coordonnées GLOBALES
+     * (0, 0) — et non du centre de la bordure ni de centreMonde (qui peuvent être décalés sur
+     * une carte personnalisée, voir demarrer()). Utilisée pour faire réapparaître un joueur
+     * réanimé (Sorcière / Infect Père des Loups) après son passage au lobby pendant la fenêtre
+     * d'attente, plutôt que de le renvoyer n'importe où dans toute la bordure (potentiellement
+     * très loin de tout le monde).
+     */
+    public Location emplacementAleatoireAutourDuZero(World monde) {
+        return emplacementAleatoireDansRayon(monde, new Location(monde, 0, 0, 0), 300.0);
     }
 
     // ================= Déroulement des épisodes =================
@@ -608,8 +1062,16 @@ public class GameManager {
         if (gp.getPlayer() == null) {
             return;
         }
+        // Loup-Garou Amnésique tant qu'il n'est pas "réveillé" (voir estAmnesiqueCache) : il ne
+        // reçoit PAS la liste générique de la meute (il ne se souvient de rien), mais sa propre
+        // liste construite par proximité (voir tickLoupGarouAmnesique()).
+        if (estAmnesiqueCache(gp)) {
+            envoyerListePersonnelleAmnesique(gp);
+            return;
+        }
         List<GamePlayer> allies = getJoueursVivants().stream()
-                .filter(g -> g.getCamp() == Camp.LOUPS && g != gp)
+                // Un Amnésique encore caché n'apparaît PAS dans la liste des AUTRES Loups non plus.
+                .filter(g -> g.getCamp() == Camp.LOUPS && g != gp && !estAmnesiqueCache(g))
                 .collect(Collectors.toList());
         if (allies.isEmpty()) {
             Msg.envoyer(gp.getPlayer(), "&cAucun autre allié Loup-Garou n'est actuellement en vie.");
@@ -617,6 +1079,89 @@ public class GameManager {
         }
         String liste = allies.stream().map(GamePlayer::getNom).collect(Collectors.joining("&7, &f"));
         Msg.envoyer(gp.getPlayer(), "&cVos alliés Loups-Garous vivants : &f" + liste);
+    }
+
+    // ================= Loup-Garou Amnésique =================
+
+    /**
+     * Vrai si `gp` est le Loup-Garou Amnésique et que son réveil individuel (70-90 min, tiré au
+     * sort une fois à l'attribution - voir LoupGarouAmnesiqueRole#onAssign) n'a pas encore sonné.
+     * Tant que c'est vrai : il n'apparaît dans AUCUNE liste d'alliés Loups affichée aux autres
+     * (ni la révélation automatique, ni un /lg role d'un allié), et lui-même ne reçoit que sa
+     * propre liste construite par proximité plutôt que la liste complète de la meute.
+     */
+    private boolean estAmnesiqueCache(GamePlayer gp) {
+        return gp.getRole() == RoleType.LOUP_GAROU_AMNESIQUE && !gp.getEtat("amnesique_revele", false);
+    }
+
+    /** Envoie à l'Amnésique caché la liste (limitée) des Loups qu'il a reconnus par proximité jusqu'ici, lui inclus. */
+    private void envoyerListePersonnelleAmnesique(GamePlayer gp) {
+        Set<UUID> connus = gp.getEtat("amnesique_connus", null);
+        StringBuilder liste = new StringBuilder("&f").append(gp.getNom());
+        if (connus != null) {
+            for (UUID uuid : connus) {
+                GamePlayer autre = getGamePlayer(uuid);
+                if (autre != null) {
+                    liste.append("&7, &f").append(autre.getNom());
+                }
+            }
+        }
+        Msg.envoyer(gp.getPlayer(), "&4🐺 Votre mémoire est floue... vous ne reconnaissez actuellement que : " + liste);
+    }
+
+    /**
+     * A appeler 1x/seconde (voir LGUHCPlugin) pendant toute la partie. Fait avancer les deux
+     * mécaniques individuelles du Loup-Garou Amnésique :
+     *  1. Son réveil (une fois l'instant tiré au sort atteint) : il rejoint alors la liste
+     *     visible de la meute, et le reste des Loups en est informé comme pour tout nouvel
+     *     arrivant (voir annoncerNouvelAllieLoup()).
+     *  2. Tant qu'il n'est pas réveillé : la découverte par proximité (moins de 10 blocs d'un
+     *     autre Loup-Garou vivant) qui alimente sa propre liste, consultable via /lg role
+     *     (voir LGCommand#afficherRole, qui appelle envoyerListeAlliesLoup même hors révélation
+     *     générale pour ce cas précis).
+     */
+    public void tickLoupGarouAmnesique() {
+        if (!estEnCours()) {
+            return;
+        }
+        long ecouleSecondes = getTempsTotalEcouleSecondes();
+        List<GamePlayer> vivants = getJoueursVivants();
+        for (GamePlayer amnesique : vivants) {
+            if (amnesique.getRole() != RoleType.LOUP_GAROU_AMNESIQUE || amnesique.getPlayer() == null) {
+                continue;
+            }
+            if (!amnesique.getEtat("amnesique_revele", false)) {
+                long instantReveil = amnesique.getEtat("amnesique_instant_reveil_secondes", Long.MAX_VALUE);
+                if (ecouleSecondes >= instantReveil) {
+                    amnesique.setEtat("amnesique_revele", true);
+                    Msg.envoyer(amnesique.getPlayer(), "&4&l🐺 Un voile se lève dans votre esprit... vous vous souvenez : vous êtes un Loup-Garou !");
+                    annoncerNouvelAllieLoup(amnesique, "se souvient soudain qu'il est des vôtres");
+                } else {
+                    Set<UUID> connus = amnesique.getEtat("amnesique_connus", null);
+                    if (connus == null) {
+                        connus = new HashSet<>();
+                    }
+                    boolean nouveauteTrouvee = false;
+                    for (GamePlayer autreLoup : vivants) {
+                        if (autreLoup == amnesique || autreLoup.getCamp() != Camp.LOUPS || autreLoup.getPlayer() == null) {
+                            continue;
+                        }
+                        if (connus.contains(autreLoup.getUuid())) {
+                            continue;
+                        }
+                        if (distanceSure(amnesique.getPlayer(), autreLoup.getPlayer()) <= 10.0) {
+                            connus.add(autreLoup.getUuid());
+                            nouveauteTrouvee = true;
+                            Msg.envoyer(amnesique.getPlayer(), "&4🐺 Une vague de mémoire... vous reconnaissez &f"
+                                    + autreLoup.getNom() + " &4comme l'un des vôtres !");
+                        }
+                    }
+                    if (nouveauteTrouvee) {
+                        amnesique.setEtat("amnesique_connus", connus);
+                    }
+                }
+            }
+        }
     }
 
     public boolean isListeLoupsRevelee() {
@@ -648,7 +1193,9 @@ public class GameManager {
     public void annoncerNouvelAllieLoup(GamePlayer nouveauLoup, String raisonArrivee) {
         String suffixe = (raisonArrivee != null && !raisonArrivee.isEmpty()) ? " &8(" + raisonArrivee + ")" : "";
         for (GamePlayer loup : getJoueursVivants()) {
-            if (loup.getCamp() == Camp.LOUPS && loup != nouveauLoup && loup.getPlayer() != null) {
+            // Un Amnésique encore caché à lui-même (voir estAmnesiqueCache) ne sait pas qu'il fait
+            // partie de la meute : il ne reçoit pas non plus les annonces d'arrivée des autres.
+            if (loup.getCamp() == Camp.LOUPS && loup != nouveauLoup && loup.getPlayer() != null && !estAmnesiqueCache(loup)) {
                 Msg.envoyer(loup.getPlayer(), "&4🐺 &c" + nouveauLoup.getNom() + " rejoint la meute !" + suffixe);
             }
         }
@@ -673,6 +1220,13 @@ public class GameManager {
                 // Le bonus de Force des Loups est désormais géré uniquement par le calcul manuel
                 // de dégâts dans UHCRulesListener#surCombatGeneral (voir beneficeForceDemiNiveau) :
                 // ne plus donner ici le vrai PotionEffect Force I, sous peine de cumuler les deux.
+            }
+            // Loup-Garou Amnésique : lui EN PLUS reçoit un vrai PotionEffect Force I la nuit (visible
+            // dans son inventaire), demandé explicitement pour ce rôle - à la place du bonus
+            // "demi-niveau" générique des autres Loups (voir UHCRulesListener#beneficeForceDemiNiveau,
+            // qui l'exclut désormais explicitement pour ne pas cumuler les deux).
+            if (gp.getRole() == RoleType.LOUP_GAROU_AMNESIQUE && nuit) {
+                p.addPotionEffect(new PotionEffect(PotionEffectType.INCREASE_DAMAGE, dureePhaseTicksInt(), 0, false, false));
             }
             // Assassin : idem, son bonus de Force le jour est géré par UHCRulesListener#surCombatGeneral.
             if (gp.getRole() == RoleType.RENARD) {
@@ -817,6 +1371,7 @@ public class GameManager {
             }
         }
         p.getInventory().setArmorContents(armure);
+        p.updateInventory();
         Msg.envoyer(p, "&cVous ne pouvez pas porter plus de 2 pièces d'armure en diamant à la fois.");
     }
 
@@ -1039,6 +1594,50 @@ public class GameManager {
     }
 
     /**
+     * Vérifie, une fois par seconde réelle (voir le minuteur 1x/seconde de LGUHCPlugin), le temps
+     * restant de l'invincibilité générale de début de partie (voir veritableDebutPartie()) et
+     * envoie un rappel dans le chat à chaque minute écoulée, puis un dernier message quand elle se
+     * termine. Basé sur System.currentTimeMillis() (comme tickDeconnexions()/tickMinuteriesAutomatiques())
+     * plutôt que sur un compteur de ticks, pour ne pas dériver sous lag.
+     */
+    public void tickInvincibiliteDebut() {
+        if (debutInvincibiliteTimestamp <= 0L || dernierRappelInvincibiliteMinute >= 5) {
+            return;
+        }
+        long ecouleSecondes = (System.currentTimeMillis() - debutInvincibiliteTimestamp) / 1000L;
+        if (ecouleSecondes >= DUREE_INVINCIBILITE_DEBUT_SECONDES) {
+            dernierRappelInvincibiliteMinute = 5;
+            diffuser("&c&lFin de l'invincibilité de début de partie, faites attention !");
+            return;
+        }
+        int minuteActuelle = (int) (ecouleSecondes / 60L);
+        if (minuteActuelle > dernierRappelInvincibiliteMinute) {
+            dernierRappelInvincibiliteMinute = minuteActuelle;
+            long resteMinutes = (DUREE_INVINCIBILITE_DEBUT_SECONDES / 60L) - minuteActuelle;
+            diffuser("&e&l⏱ Invincibilité de début de partie : encore &f" + resteMinutes + " &e&lminute(s).");
+        }
+    }
+
+    /**
+     * Vrai si ce joueur est actuellement protégé de tous les dégâts, que ce soit par
+     * l'invincibilité générale de début de partie ou par une invincibilité individuelle accordée
+     * à un respawn (voir UHCRulesListener#surRespawn), les deux étant stockées dans le même champ
+     * d'état "invincible_jusqua" (le plus grand des deux l'emporte toujours, voir surRespawn).
+     * Couvre aussi le gel de préparation avant le vrai début de partie (flag "gel_debut_actif").
+     * Vérifié depuis UHCRulesListener#surDegatsGeneraux pour annuler le dégât.
+     */
+    public boolean estProtege(GamePlayer gp) {
+        if (gp == null) {
+            return false;
+        }
+        if (gp.getEtat("gel_debut_actif", false)) {
+            return true;
+        }
+        long jusqua = gp.getEtat("invincible_jusqua", 0L);
+        return System.currentTimeMillis() < jusqua;
+    }
+
+    /**
      * Appelé par le Listener sur un PlayerDeathEvent réel (combat, chute,
      * éliminations forcées...). Ouvre la fenêtre de résurrection (Infect
      * Père des Loups puis Sorcière) plutôt que de finaliser immédiatement.
@@ -1058,8 +1657,23 @@ public class GameManager {
         }
         gp.setVivant(false);
         gp.setEnAttenteMort(false);
-        if (gp.getPlayer() != null) {
-            gp.getPlayer().setWalkSpeed(RenardRole.VITESSE_MARCHE_NORMALE);
+        Player joueurMort = gp.getPlayer();
+        if (joueurMort != null) {
+            joueurMort.setWalkSpeed(RenardRole.VITESSE_MARCHE_NORMALE);
+            // Le joueur patientait au lobby depuis debuterFenetreMort() (voir DeathManager) : sa
+            // mort devient définitive, direction spectateur DANS LE MONDE DE JEU (et non plus le
+            // lobby) pour qu'il puisse suivre la suite de la partie. On vise l'endroit exact de
+            // sa mort (mémorisé par DeathManager AVANT dropperStuff(), qui le consomme juste en
+            // dessous) plutôt qu'un point aléatoire.
+            Location lieuMort = plugin.getDeathManager().getDernierLieuMort(gp.getUuid());
+            if (lieuMort != null && lieuMort.getWorld() != null) {
+                joueurMort.teleport(lieuMort);
+            } else {
+                World mondeJeu = getMondeJeu();
+                if (mondeJeu != null) {
+                    joueurMort.teleport(emplacementAleatoireDansBordure(mondeJeu));
+                }
+            }
         }
         // Mort définitive : le stuff intercepté à la mort réelle tombe enfin au sol,
         // à l'endroit exact où le joueur est mort.
@@ -1144,9 +1758,28 @@ public class GameManager {
             return;
         }
 
-        long loups = vivants.stream().filter(g -> g.getCamp() == Camp.LOUPS).count();
+        // Loup-Garou Blanc : compté dans le camp des Loups pour TOUTES les mécaniques de jeu
+        // (chat de meute, vision de nuit, liste des alliés, pouvoirs...) - c'est un Loup normal
+        // en tout point, sans commande ni capacité à part. Mais il ne partage PAS la victoire
+        // collective des Loups : il ne gagne que s'il finit unique survivant, ce qui suppose
+        // qu'il élimine lui-même ses anciens alliés au corps-à-corps le moment venu. Ce check
+        // doit passer AVANT le calcul loups/solos/village ci-dessous, sans quoi "village == 0"
+        // le ferait gagner à tort comme un Loup normal dès que le Village est éliminé, même
+        // avec d'autres Loups encore vivants.
+        GamePlayer loupBlanc = vivants.stream()
+                .filter(g -> g.getRole() == RoleType.LOUP_GAROU_BLANC)
+                .findFirst().orElse(null);
+        if (vivants.size() == 1 && loupBlanc != null) {
+            terminerPartie(null, loupBlanc.getRole().getNomAffiche() + " (" + loupBlanc.getNom() + ")");
+            return;
+        }
+
+        // Le Loup-Garou Blanc est exclu de "loups" ci-dessous (voir javadoc au-dessus : il ne
+        // partage pas leur victoire), et donc aussi de "village" (sans quoi il serait compté à
+        // tort comme un Villageois dans le décompte).
+        long loups = vivants.stream().filter(g -> g.getCamp() == Camp.LOUPS && g != loupBlanc).count();
         long solos = vivants.stream().filter(g -> g.getCamp() == Camp.SOLO).count();
-        long village = vivants.size() - loups - solos;
+        long village = vivants.size() - loups - solos - (loupBlanc != null ? 1 : 0);
 
         // Un Solo (ex: Assassin) est hostile à tout le monde : tant qu'il est vivant,
         // ni le Village ni les Loups ne peuvent être déclarés vainqueurs "par défaut" -
@@ -1159,6 +1792,13 @@ public class GameManager {
         if (solos > 0) {
             // Un ou plusieurs Solo sont encore vivants et pas seuls : la partie continue,
             // quel que soit le rapport de force Village/Loups.
+            return;
+        }
+        if (loupBlanc != null) {
+            // Le Loup-Garou Blanc est vivant mais pas encore seul (le cas "seul survivant" est
+            // déjà traité plus haut) : comme un Solo, sa seule présence empêche toute victoire
+            // "par défaut" du Village ou des Loups tant qu'il n'a pas été éliminé - par le
+            // Village ou par ses anciens alliés - ou qu'il n'est pas devenu l'unique survivant.
             return;
         }
 
@@ -1211,6 +1851,20 @@ public class GameManager {
             if (emplacementLobby != null) {
                 p.teleport(emplacementLobby);
             }
+            // demarrer() vide déjà l'inventaire/armure au LANCEMENT d'une partie, mais rien
+            // n'était fait au RESET : un /lg stop renvoyait les joueurs au lobby avec le stuff
+            // de la partie qui vient de se terminer encore sur eux (armure comprise, jamais
+            // touchée par Inventory#clear()), potions actives, et une éventuelle vie max
+            // réduite de façon permanente (Idiot du Village) qui restait bloquée pour la partie
+            // suivante.
+            p.getInventory().clear();
+            p.getInventory().setArmorContents(new org.bukkit.inventory.ItemStack[4]);
+            for (PotionEffect eff : new ArrayList<>(p.getActivePotionEffects())) {
+                p.removePotionEffect(eff.getType());
+            }
+            p.setMaxHealth(20.0);
+            p.setHealth(20.0);
+            p.setFoodLevel(20);
         }
         joueurs.clear();
         phase = GamePhase.LOBBY;
@@ -1223,6 +1877,17 @@ public class GameManager {
         ticksEcoulesDansPhase = 0L;
         listeLoupsRevelee = false;
         echeancesDeconnexion.clear();
+        debutInvincibiliteTimestamp = 0L;
+        dernierRappelInvincibiliteMinute = 0;
+        secondesPremierEvenementAleatoire = -1L;
+        secondesSecondEvenementAleatoire = -1L;
+        premierEvenementAleatoireDeclenche = false;
+        secondEvenementAleatoireDeclenche = false;
+        secondesRumeursAleatoire = -1L;
+        rumeursAleatoireDeclenche = false;
+        collecteRumeursActive = false;
+        joueursAyantEnvoyeRumeur.clear();
+        messagesRumeursCollectes.clear();
 
         // Tout le monde est sorti du monde de jeu (téléporté au lobby ci-dessus, ou déjà
         // hors ligne) : on peut le régénérer en tâche de fond avant la prochaine partie.
@@ -1231,8 +1896,12 @@ public class GameManager {
         }
     }
 
-    /** Le monde lobby configuré (monde.lobby) s'il existe et est chargé, sinon null. */
-    private World getMondeLobbySiConfigure() {
+    /**
+     * Le monde lobby configuré (monde.lobby) s'il existe et est chargé, sinon null. Public pour
+     * que d'autres classes (LobbyListener, pour les réglages "monde lobby" : jour perma, pas de
+     * mobs, immortalité...) puissent s'y référer sans redupliquer la lecture de monde.lobby.
+     */
+    public World getMondeLobby() {
         String nom = plugin.getConfig().getString("monde.lobby", null);
         return (nom == null || nom.isEmpty()) ? null : Bukkit.getWorld(nom);
     }
@@ -1245,11 +1914,21 @@ public class GameManager {
      * atterrir n'importe où, y compris très loin en Y négatif.
      */
     public Location getEmplacementLobby() {
-        World lobby = getMondeLobbySiConfigure();
+        World lobby = getMondeLobby();
         if (lobby == null) {
             return null;
         }
         return new Location(lobby, 0.5, 54.0, 0.5);
+    }
+
+    // ================= Chat (coupure manuelle par un hôte) =================
+
+    public boolean isChatDesactive() {
+        return chatDesactive;
+    }
+
+    public void setChatDesactive(boolean chatDesactive) {
+        this.chatDesactive = chatDesactive;
     }
 
     // ================= Blocage des pouvoirs (Ancien) =================

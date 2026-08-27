@@ -108,6 +108,17 @@ public class DeathManager {
         Player joueur = gp.getPlayer();
         if (joueur != null) {
             joueur.setGameMode(GameMode.SPECTATOR);
+            // Renvoyé au lobby pendant TOUTE la fenêtre d'attente (5s + jusqu'à 16s de
+            // proposition Infect Père/Sorcière) : évite qu'il entende des informations de jeu
+            // via la proximité vocale (Mumble) alors qu'il a encore une chance d'être réanimé.
+            // S'il ne l'est pas, GameManager#finaliserMort le renverra spectateur dans le monde
+            // de jeu (à l'endroit exact de sa mort, voir getDernierLieuMort ci-dessous) ; s'il
+            // est réanimé, LGCommand le téléportera lui-même autour du (0,0) du monde de jeu.
+            Location emplacementLobby = gm.getEmplacementLobby();
+            if (emplacementLobby != null) {
+                joueur.teleport(emplacementLobby);
+            }
+            Msg.envoyer(joueur, "&7Vous patientez au lobby, en attente d'une éventuelle réanimation...");
         }
 
         // --- Ordre de priorité de résurrection, 3) et 4) : après un délai de 5 secondes
@@ -281,6 +292,16 @@ public class DeathManager {
      */
     public void sauvegarderStuff(GamePlayer gp, List<ItemStack> drops) {
         stuffSauvegarde.put(gp.getUuid(), new ArrayList<>(drops));
+    }
+
+    /**
+     * Consulte (SANS le retirer) le lieu de mort mémorisé pour ce joueur. A appeler par
+     * {@link GameManager#finaliserMort} avant dropperStuff() (qui, lui, le retire) pour
+     * renvoyer le joueur spectateur dans le monde de jeu à l'endroit exact de sa mort, puisque
+     * entre-temps il patientait au lobby (voir debuterFenetreMort ci-dessus).
+     */
+    public Location getDernierLieuMort(UUID uuid) {
+        return dernierLieuMort.get(uuid);
     }
 
     /**

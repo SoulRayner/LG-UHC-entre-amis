@@ -12,8 +12,11 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.enchantments.Enchantment;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.ExperienceOrb;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.Projectile;
+import org.bukkit.projectiles.ProjectileSource;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -23,13 +26,18 @@ import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityRegainHealthEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.enchantment.EnchantItemEvent;
+import org.bukkit.event.inventory.CraftItemEvent;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.player.PlayerAchievementAwardedEvent;
 import org.bukkit.event.player.PlayerBucketEmptyEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerItemConsumeEvent;
+import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.weather.WeatherChangeEvent;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.EnchantmentStorageMeta;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -42,23 +50,48 @@ public class UHCRulesListener implements Listener {
     private static final double XP_FONTE_FER = 0.7;
     private static final double XP_FONTE_OR = 1.0;
 
+    /**
+     * Multiplicateur d'XP appliqué à TOUS les minerais (fer/or via la fonte simulée ci-dessus,
+     * et charbon/diamant/redstone/lapis/émeraude/quartz du Nether via leur XP vanilla naturelle,
+     * boostée dans surMinage). 1.2 = +20% par rapport au vanilla/à la fonte réelle.
+     */
+    private static final double MULTIPLICATEUR_XP_MINERAIS = 1.2;
+
     /** Taux de drop de pomme par feuille cassée, très largement boosté par rapport au vanilla (~0.5%). */
     private static final double TAUX_DROP_POMME = 0.5;
+
+    /** Chance de récupérer du silex plutôt que du gravier en cassant du gravier (10% en vanilla). */
+    private static final double TAUX_DROP_SILEX = 0.5;
+
+    /**
+     * Multiplicateur de dégâts qu'un coup critique doit donner par rapport à un coup de base
+     * (1.0 = aucun bonus, 1.5 = critique vanilla complet). Doit rester strictly entre les deux :
+     * un critique reste toujours meilleur qu'un coup de base, mais moins fort qu'un critique
+     * Minecraft normal.
+     */
+    private static final double MULTIPLICATEUR_CRITIQUE_VOULU = 1.25;
+
+    /** Multiplicateur que le serveur (NMS) a DEJA appliqué à l'attaque avant même que cet évènement Bukkit soit levé. */
+    private static final double MULTIPLICATEUR_CRITIQUE_VANILLA = 1.5;
+
+    /**
+     * Probabilité d'annuler le dégât qu'une enclume vient de subir. En vanilla, chaque réparation
+     * a 12% de chance d'endommager l'enclume (codé en dur côté serveur, jusqu'à la casser
+     * complètement au 3ème dégât). A 0.6, la chance réelle de dégât retombe à 12% * (1 - 0.6) =
+     * 4.8% par réparation, soit environ 2,5x plus de réparations avant la casse qu'en vanilla.
+     * Montez vers 1.0 pour une enclume quasi incassable, ou vers 0.0 pour le comportement vanilla.
+     */
+    private static final double CHANCE_ANNULATION_DEGAT_ENCLUME = 0.6;
+
+    /** Durée de l'invincibilité individuelle accordée à un joueur qui respawn en pleine partie (voir surRespawn). */
+    private static final long DUREE_INVINCIBILITE_RESPAWN_MS = 30 * 1000L;
 
     public UHCRulesListener(LGUHCPlugin plugin) {
         this.plugin = plugin;
     }
 
-    /**
-     * Simule l'XP qu'un vrai four donnerait à la récupération du lingot. L'XP de fonte
-     * n'est pas un nombre entier (0.7 pour le fer, par exemple) : on accumule la partie
-     * fractionnaire par joueur (dans son état GamePlayer, comme diamants_mines) et on ne
-     * fait apparaître un orbe que lorsque le cumul dépasse 1, exactement comme le fait le
-     * four vanilla en interne. L'orbe apparaît au sol, à ramasser comme n'importe quel XP
-     * (pas donné directement), pour rester cohérent avec le comportement vanilla.
-     */
     private void donnerExpFonte(Location lieu, GamePlayer gp, double montantParLingot) {
-        double accumulee = gp.getEtat("xp_fonte_accumulee", 0.0) + montantParLingot;
+        double accumulee = gp.getEtat("xp_fonte_accumulee", 0.0) + (montantParLingot * MULTIPLICATEUR_XP_MINERAIS);
         int pointsEntiers = (int) Math.floor(accumulee);
         if (pointsEntiers > 0) {
             ExperienceOrb orbe = lieu.getWorld().spawn(lieu, ExperienceOrb.class);
@@ -87,8 +120,13 @@ public class UHCRulesListener implements Listener {
         }
     }
 
-    /** Niveau maximum autorisé pour cet enchantement sur ce matériau (Integer.MAX_VALUE = pas de limite définie). */
-    private int maxAutorise(Enchantment ench, Material materiel) {
+    /**
+     * @param joueur le joueur en train d'enchanter/réparer (peut être null si l'appelant ne le
+     *               connaît pas) : sert uniquement à distinguer le plafond Tranchant du Solitaire
+     *               (Assassin), qui a droit à un niveau de plus que le reste de la partie. Tout le
+     *               reste (Puissance, Protection, interdictions) ne dépend pas du joueur.
+     */
+    private int maxAutorise(Enchantment ench, Material materiel, Player joueur) {
         if (ench.equals(Enchantment.FIRE_ASPECT) && plugin.getConfig().getBoolean("survie-uhc.enchant-fire-aspect-interdit", true)) {
             return 0;
         }
@@ -99,10 +137,13 @@ public class UHCRulesListener implements Listener {
             return 0;
         }
         if (ench.equals(Enchantment.DAMAGE_ALL)) {
+            if (estCampSolo(joueur)) {
+                return plugin.getConfig().getInt("survie-uhc.niveau-max-tranchant-solo", 4);
+            }
             return plugin.getConfig().getInt("survie-uhc.niveau-max-tranchant", 3);
         }
         if (ench.equals(Enchantment.ARROW_DAMAGE)) {
-            return plugin.getConfig().getInt("survie-uhc.niveau-max-puissance", 3);
+            return plugin.getConfig().getInt("survie-uhc.niveau-max-puissance", 2);
         }
         if (ench.equals(Enchantment.PROTECTION_ENVIRONMENTAL)) {
             return capProtectionPour(materiel);
@@ -110,7 +151,15 @@ public class UHCRulesListener implements Listener {
         return Integer.MAX_VALUE;
     }
 
-    /** Utilise le nom du matériau plutôt que la constante exacte (plus robuste face aux variantes cuir/or/fer/chaîne). */
+    /** Vrai si ce joueur est actuellement du camp Solitaire (Assassin) — utilisé pour le plafond Tranchant dédié. */
+    private boolean estCampSolo(Player joueur) {
+        if (joueur == null) {
+            return false;
+        }
+        GamePlayer gp = plugin.getGameManager().getGamePlayer(joueur);
+        return gp != null && gp.getCamp() == Camp.SOLO;
+    }
+
     private int capProtectionPour(Material materiel) {
         String nom = materiel.name();
         boolean estUneArmure = nom.contains("HELMET") || nom.contains("CHESTPLATE") || nom.contains("LEGGINGS") || nom.contains("BOOTS");
@@ -128,7 +177,7 @@ public class UHCRulesListener implements Listener {
         Map<Enchantment, Integer> enchants = event.getEnchantsToAdd();
         Map<Enchantment, Integer> corrections = new HashMap<>();
         for (Map.Entry<Enchantment, Integer> entree : enchants.entrySet()) {
-            int max = maxAutorise(entree.getKey(), event.getItem().getType());
+            int max = maxAutorise(entree.getKey(), event.getItem().getType(), event.getEnchanter());
             if (entree.getValue() > max) {
                 corrections.put(entree.getKey(), max);
             }
@@ -143,26 +192,42 @@ public class UHCRulesListener implements Listener {
     }
 
     /**
-     * Plafonne le résultat de l'enclume avec les mêmes limites que surEnchantement() ci-dessus
-     * (Tranchant/Puissance/Protection, Feu/Flamme/Recul interdits...) : sans ce handler, l'enclume
-     * contourne totalement ces plafonds - combiner deux Tranchant III (table, donc déjà plafonné)
-     * produit un Tranchant IV en enclume, et ainsi de suite jusqu'au niveau max vanilla de
-     * l'enchantement. S'applique aussi bien à un objet réellement enchanté (épée, armure...) qu'à
-     * un livre enchanté (stockage différent côté API, d'où les deux branches ci-dessous).
+     * Plafonne le résultat de l'enclume en 1.8.8 (remplace PrepareAnvilEvent de la 1.9+).
      */
     @EventHandler(ignoreCancelled = true)
-    public void surPreparationEnclume(org.bukkit.event.inventory.PrepareAnvilEvent event) {
-        ItemStack resultat = event.getResult();
+    public void surClicEnclume(InventoryClickEvent event) {
+        if (event.getInventory() == null || event.getInventory().getType() != InventoryType.ANVIL) {
+            return;
+        }
+        if (event.getRawSlot() != 2) {
+            return;
+        }
+
+        ItemStack resultat = event.getCurrentItem();
         if (resultat == null || resultat.getType() == Material.AIR) {
             return;
         }
+
+        Player joueur = (event.getWhoClicked() instanceof Player) ? (Player) event.getWhoClicked() : null;
+
+        if (joueur != null) {
+            org.bukkit.block.Block blocCible = joueur.getTargetBlock((java.util.Set<Material>) null, 6);
+
+            if (blocCible != null && blocCible.getType() == Material.ANVIL) {
+                Location emplacementEnclume = blocCible.getLocation();
+                Material typeAvant = blocCible.getType();
+                byte dataAvant = blocCible.getData();
+
+                Bukkit.getScheduler().runTask(plugin, () -> protegerDurabiliteEnclume(emplacementEnclume, typeAvant, dataAvant));
+            }
+        }
+
         boolean modifie = false;
 
-        if (resultat.getItemMeta() instanceof org.bukkit.inventory.meta.EnchantmentStorageMeta) {
-            org.bukkit.inventory.meta.EnchantmentStorageMeta meta =
-                    (org.bukkit.inventory.meta.EnchantmentStorageMeta) resultat.getItemMeta();
+        if (resultat.getItemMeta() instanceof EnchantmentStorageMeta) {
+            EnchantmentStorageMeta meta = (EnchantmentStorageMeta) resultat.getItemMeta();
             for (Map.Entry<Enchantment, Integer> entree : new HashMap<>(meta.getStoredEnchants()).entrySet()) {
-                int max = maxAutorise(entree.getKey(), resultat.getType());
+                int max = maxAutorise(entree.getKey(), resultat.getType(), joueur);
                 if (entree.getValue() > max) {
                     meta.removeStoredEnchant(entree.getKey());
                     if (max > 0) {
@@ -171,10 +236,12 @@ public class UHCRulesListener implements Listener {
                     modifie = true;
                 }
             }
-            resultat.setItemMeta(meta);
+            if (modifie) {
+                resultat.setItemMeta(meta);
+            }
         } else {
             for (Map.Entry<Enchantment, Integer> entree : new HashMap<>(resultat.getEnchantments()).entrySet()) {
-                int max = maxAutorise(entree.getKey(), resultat.getType());
+                int max = maxAutorise(entree.getKey(), resultat.getType(), joueur);
                 if (entree.getValue() > max) {
                     resultat.removeEnchantment(entree.getKey());
                     if (max > 0) {
@@ -184,20 +251,68 @@ public class UHCRulesListener implements Listener {
                 }
             }
         }
+    }
 
-        if (modifie) {
-            event.setResult(resultat);
+    /**
+     * Rend les enclumes plus résistantes que la vanilla. Le dégât d'enclume (12% de chance par
+     * réparation en vanilla, jusqu'à casser complètement au 3ème dégât) est codé en dur côté
+     * serveur et n'est exposé par aucun évènement Bukkit en 1.8.8 (contrairement à
+     * PrepareAnvilEvent en 1.9+) : impossible donc de l'empêcher AVANT qu'il survienne. On laisse
+     * faire, puis on compare l'état du bloc juste avant/après le clic pour annuler le dégât avec
+     * la probabilité CHANCE_ANNULATION_DEGAT_ENCLUME. La donnée du bloc encode l'orientation sur
+     * les bits 0-1 et le niveau de dégât sur les bits 2-3 (0 = intacte, 1 = abîmée, 2 = très
+     * abîmée) ; on ne touche jamais aux bits d'orientation.
+     */
+    private void protegerDurabiliteEnclume(Location emplacement, Material typeAvant, byte dataAvant) {
+        if (typeAvant != Material.ANVIL) {
+            return;
+        }
+        int orientation = dataAvant & 0x3;
+        int degatAvant = (dataAvant >> 2) & 0x3;
+
+        org.bukkit.block.Block bloc = emplacement.getBlock();
+        if (bloc.getType() != Material.ANVIL) {
+            // L'enclume vient de casser complètement (dégât au-delà de "très abîmée").
+            if (Math.random() < CHANCE_ANNULATION_DEGAT_ENCLUME) {
+                bloc.setType(Material.ANVIL);
+                bloc.setData((byte) (orientation | (degatAvant << 2)));
+            }
+            return;
+        }
+
+        byte dataApres = bloc.getData();
+        int degatApres = (dataApres >> 2) & 0x3;
+        if (degatApres > degatAvant && Math.random() < CHANCE_ANNULATION_DEGAT_ENCLUME) {
+            bloc.setData((byte) (orientation | (degatAvant << 2)));
         }
     }
 
     @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGH)
     public void surDegatsJoueurAvantPartie(EntityDamageByEntityEvent event) {
-        if (!(event.getEntity() instanceof Player) || !(event.getDamager() instanceof Player)) {
+        if (!(event.getEntity() instanceof Player)) {
+            return;
+        }
+        Player attaquant = extraireAttaquant(event.getDamager());
+        if (attaquant == null) {
             return;
         }
         if (!plugin.getGameManager().estEnCours() || plugin.getGameManager().getEpisodeActuel() < 2) {
             event.setCancelled(true);
         }
+    }
+
+    /** Retrouve le joueur réellement à l'origine d'un dégât, y compris pour une flèche (le "damager" est alors l'Arrow, pas le tireur). */
+    private Player extraireAttaquant(Entity damager) {
+        if (damager instanceof Player) {
+            return (Player) damager;
+        }
+        if (damager instanceof Projectile) {
+            ProjectileSource tireur = ((Projectile) damager).getShooter();
+            if (tireur instanceof Player) {
+                return (Player) tireur;
+            }
+        }
+        return null;
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -208,9 +323,6 @@ public class UHCRulesListener implements Listener {
             return;
         }
         event.setDeathMessage(null);
-        // Interception du stuff AVANT de vider les drops : sinon il disparaît purement et
-        // simplement (ni gardé sur le joueur, ni au sol). DeathManager le rendra au joueur
-        // s'il est réanimé, ou le fera tomber au sol quand la mort deviendra définitive.
         plugin.getDeathManager().sauvegarderStuff(gp, event.getDrops());
         event.getDrops().clear();
         event.setDroppedExp(0);
@@ -229,9 +341,27 @@ public class UHCRulesListener implements Listener {
             }
         }
 
-        // La raison affichée n'est plus utilisée par DeathManager#annoncerMort (message générique désormais),
-        // mais le paramètre reste dans la chaîne d'appel pour ne pas casser les autres appelants de eliminer(...).
         plugin.getGameManager().surMortReelle(gp, campDetecte, null);
+    }
+
+    /**
+     * Gèle un joueur sur place (position bloquée, la vue reste libre) pendant le compte à rebours
+     * de préparation qui suit /lg start, avant le vrai début de partie (voir
+     * GameManager#demarrerCompteAReboursDebut). Piloté par le flag d'état "gel_debut_actif",
+     * positionné/retiré par GameManager. On ne compare que X/Y/Z (pas yaw/pitch) : le joueur peut
+     * toujours regarder autour de lui, il ne peut simplement pas se déplacer.
+     */
+    @EventHandler(ignoreCancelled = true)
+    public void surMouvementGelDebut(PlayerMoveEvent event) {
+        GamePlayer gp = plugin.getGameManager().getGamePlayer(event.getPlayer());
+        if (gp == null || !gp.getEtat("gel_debut_actif", false)) {
+            return;
+        }
+        Location from = event.getFrom();
+        Location to = event.getTo();
+        if (from.getX() != to.getX() || from.getY() != to.getY() || from.getZ() != to.getZ()) {
+            event.setTo(new Location(to.getWorld(), from.getX(), from.getY(), from.getZ(), to.getYaw(), to.getPitch()));
+        }
     }
 
     @EventHandler
@@ -239,14 +369,7 @@ public class UHCRulesListener implements Listener {
         Player joueur = event.getPlayer();
         GameManager gm = plugin.getGameManager();
 
-        // Sans lit posé (normal en UHC), Bukkit retombe sur son comportement par défaut : il
-        // respawn le joueur dans le monde "principal" du serveur (typiquement "world", pas
-        // forcément celui où il vient de mourir), à un endroit que Minecraft calcule tout seul.
-        // On force donc systématiquement une destination explicite selon le contexte, plutôt
-        // que de laisser Bukkit décider.
         if (!gm.estEnCours()) {
-            // Aucune partie en cours (avant /lg start, ou après /lg stop) : direction le lobby,
-            // à son point d'apparition fixe.
             Location emplacementLobby = gm.getEmplacementLobby();
             if (emplacementLobby != null) {
                 event.setRespawnLocation(emplacementLobby);
@@ -254,20 +377,32 @@ public class UHCRulesListener implements Listener {
             return;
         }
 
-        // Partie en cours : on force la réapparition dans le monde de jeu, à l'intérieur de la
-        // bordure actuelle, pour que le joueur reste dans le même monde et puisse continuer à
-        // suivre/spectate la partie plutôt que de se retrouver ailleurs.
         World mondeJeu = Bukkit.getWorld(plugin.getConfig().getString("monde.nom", "world"));
         if (mondeJeu != null) {
             event.setRespawnLocation(gm.emplacementAleatoireDansBordure(mondeJeu));
         }
 
-        // Repasse en spectateur au respawn s'il est mort définitivement OU encore dans sa
-        // fenêtre de mort différée (résurrection encore possible par la Sorcière/l'Infect Père) :
-        // dans les deux cas, il ne doit pas se retrouver en Survival au milieu de la partie.
         GamePlayer gp = gm.getGamePlayer(joueur);
         if (gp != null && (!gp.isVivant() || gp.isEnAttenteMort())) {
             plugin.getServer().getScheduler().runTask(plugin, () -> joueur.setGameMode(GameMode.SPECTATOR));
+        }
+
+        // Invincibilité de 30 secondes après un respawn (mob/chute/PvP à l'arrivée sur un
+        // emplacement aléatoire de la bordure) : on prend le MAXIMUM avec une éventuelle
+        // invincibilité déjà en cours (ex: invincibilité générale de début de partie) pour ne
+        // jamais RÉDUIRE la protection d'un joueur qui respawn tôt dans la partie.
+        if (gp != null) {
+            long proposition = System.currentTimeMillis() + DUREE_INVINCIBILITE_RESPAWN_MS;
+            long actuelle = gp.getEtat("invincible_jusqua", 0L);
+            gp.setEtat("invincible_jusqua", Math.max(actuelle, proposition));
+            Msg.envoyer(joueur, "&a&lVous êtes invincible pendant 30 secondes.");
+            Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                // Ne prévient de la fin que si l'invincibilité est VRAIMENT retombée entre-temps
+                // (elle a pu être prolongée par ailleurs, ex: un nouveau respawn).
+                if (gp.getEtat("invincible_jusqua", 0L) <= System.currentTimeMillis()) {
+                    Msg.envoyer(joueur, "&c&lVous n'êtes plus invincible.");
+                }
+            }, DUREE_INVINCIBILITE_RESPAWN_MS / 50L);
         }
     }
 
@@ -278,22 +413,17 @@ public class UHCRulesListener implements Listener {
         }
         Player joueur = (Player) event.getEntity();
         GamePlayer gp = plugin.getGameManager().getGamePlayer(joueur);
-        if (gp != null && !gp.isVivant()) {
+        if (gp == null) {
+            return;
+        }
+        // EntityDamageByEntityEvent (PvP, mobs...) partage la même liste d'évènements que
+        // EntityDamageEvent : ce handler intercepte donc bien TOUS les types de dégâts, pas
+        // seulement les dégâts "génériques" (chute, lave, faim...).
+        if (!gp.isVivant() || plugin.getGameManager().estProtege(gp)) {
             event.setCancelled(true);
         }
     }
 
-    /**
-     * Immunité totale aux dégâts de feu/lave pendant les X premières minutes de jeu réel
-     * après /lg start (survie-uhc.duree-immunite-feu-minutes, 20 par défaut) : le compteur
-     * utilisé est getTempsTotalEcouleSecondes(), indépendant des phases jour/nuit et des
-     * /lg admin skip (contrairement à un minuteur de phase, il ne peut pas être avancé/reculé
-     * par erreur par les tests admin). Ne s'applique que si une partie est réellement en
-     * cours : sans ce garde-fou, un debutPartieTimestamp jamais initialisé (avant le tout
-     * premier /lg start) donnerait un temps écoulé de 0, donc une immunité permanente au lobby.
-     * Le joueur continue de prendre feu visuellement (pas de setFireTicks(0) ici), seuls les
-     * dégâts sont annulés.
-     */
     @EventHandler(ignoreCancelled = true)
     public void surDegatsFeuDebutPartie(EntityDamageEvent event) {
         if (!(event.getEntity() instanceof Player)) {
@@ -323,49 +453,35 @@ public class UHCRulesListener implements Listener {
         Player attaquant = (Player) event.getDamager();
         Player victime = (Player) event.getEntity();
 
-        // Nerf des coups critiques : un coup critique (heuristique : joueur en chute libre) n'inflige
-        // plus que 35% de ses dégâts, soit 65% de dégâts en moins par rapport à un coup critique normal.
         boolean probablementCritique = !attaquant.isOnGround() && attaquant.getFallDistance() > 0.0f;
         if (probablementCritique) {
-            event.setDamage(event.getDamage() * 0.35);
+            event.setDamage(event.getDamage() * (MULTIPLICATEUR_CRITIQUE_VOULU / MULTIPLICATEUR_CRITIQUE_VANILLA));
         }
 
-        // Force I systématique pour l'attaquant : 60% du bonus de dégâts de la vraie Force I
-        // vanilla (+3 dégâts en plein niveau -> +1.8 ici), appliqué sur CHAQUE coup, sans tirage au sort.
         event.setDamage(event.getDamage() + 1.8);
 
-        // Force 0,5 de rôle : Loups (tous, la nuit) et Assassin (le jour). Un demi-niveau de Force I
-        // vanilla = la moitié de son bonus de +3 dégâts, donc +1.5 ici, appliqué à chaque coup, sans
-        // tirage au sort (remplace l'ancien PotionEffect en plein niveau appliqué en début de phase).
         GamePlayer gpAttaquant = plugin.getGameManager().getGamePlayer(attaquant);
         if (gpAttaquant != null && gpAttaquant.isVivant() && beneficeForceDemiNiveau(gpAttaquant)) {
             event.setDamage(event.getDamage() + 1.5);
         }
 
-        // Résistance I systématique pour la victime : réduction de 20% des dégâts subis (le taux
-        // exact de la vraie Résistance I vanilla), appliquée sur CHAQUE coup, sans tirage au sort.
         event.setDamage(event.getDamage() * 0.8);
 
-        // Résistance 0,25 de rôle : l'Ancien. Un quart de niveau de Résistance I vanilla = un quart
-        // de sa réduction de 20%, donc 5% ici (dégâts x0.95), appliqué à chaque coup, sans tirage au
-        // sort (remplace l'ancien PotionEffect en plein niveau tiré au sort une fois par phase).
         GamePlayer gpVictime = plugin.getGameManager().getGamePlayer(victime);
         if (gpVictime != null && gpVictime.isVivant() && gpVictime.getRole() == RoleType.ANCIEN) {
             event.setDamage(event.getDamage() * 0.95);
         }
     }
 
-    /**
-     * Vrai si ce joueur doit recevoir la moitié de l'effet Force au moment présent :
-     * tous les Loups la nuit (Loup-Garou, Loup Mystique, Loup Blanc, Infect Père des
-     * Loups, Infecté, Enfant Sauvage transformé — tout ce qui a Camp.LOUPS), l'Assassin
-     * le jour, et le Loup Perfide UNIQUEMENT pendant qu'il est invisible (son cas est à
-     * part : il n'a pas Force juste parce que c'est la nuit, seulement le temps de son
-     * invisibilité active, cf. LGCommand#loupPerfide).
-     */
     private boolean beneficeForceDemiNiveau(GamePlayer gp) {
         if (gp.getRole() == RoleType.LOUP_PERFIDE) {
             return gp.getEtat("perfide_invisible_actif", false);
+        }
+        // Loup-Garou Amnésique : reçoit à la place un vrai PotionEffect Force I la nuit (voir
+        // GameManager#appliquerEffetsPeriodiques) - propriété distinctive de ce rôle plutôt que
+        // le bonus "demi-niveau" générique des autres Loups. Exclu ici pour ne pas cumuler les deux.
+        if (gp.getRole() == RoleType.LOUP_GAROU_AMNESIQUE) {
+            return false;
         }
         boolean nuit = plugin.getGameManager().estNuit();
         boolean estLoup = gp.getCamp() == Camp.LOUPS;
@@ -416,13 +532,69 @@ public class UHCRulesListener implements Listener {
         if (type == Material.DIAMOND_ORE) {
             int mines = gp.getEtat("diamants_mines", 0) + 1;
             gp.setEtat("diamants_mines", mines);
-            if (mines > 17) {
+            int limite = plugin.getConfig().getInt("survie-uhc.limite-diamants-mines", 17);
+            if (mines > limite) {
                 event.setCancelled(true);
                 event.getBlock().setType(Material.AIR);
                 event.getPlayer().getWorld().dropItemNaturally(event.getBlock().getLocation(), new ItemStack(Material.GOLD_INGOT, 2));
-                Msg.envoyer(event.getPlayer(), "&6Limite de 17 diamants minés atteinte : vous recevez 2 lingots d'or à la place.");
+                Msg.envoyer(event.getPlayer(), "&6Limite de " + limite + " diamants minés atteinte : vous recevez 2 lingots d'or à la place.");
+                return;
             }
         }
+
+        if (estMineraiAvecExpVanilla(type)) {
+            event.setExpToDrop((int) Math.round(event.getExpToDrop() * MULTIPLICATEUR_XP_MINERAIS));
+        }
+    }
+
+    private boolean estMineraiAvecExpVanilla(Material type) {
+        return type == Material.COAL_ORE
+                || type == Material.DIAMOND_ORE
+                || type == Material.REDSTONE_ORE
+                || type == Material.GLOWING_REDSTONE_ORE
+                || type == Material.LAPIS_ORE
+                || type == Material.EMERALD_ORE
+                || type == Material.QUARTZ_ORE;
+    }
+
+    private static final java.util.Set<Material> OBJETS_DIAMANT_LIMITES = java.util.EnumSet.of(
+            Material.DIAMOND_SWORD, Material.DIAMOND_PICKAXE, Material.DIAMOND_AXE, Material.DIAMOND_SPADE, Material.DIAMOND_HOE,
+            Material.DIAMOND_HELMET, Material.DIAMOND_CHESTPLATE, Material.DIAMOND_LEGGINGS, Material.DIAMOND_BOOTS
+    );
+
+    @EventHandler(ignoreCancelled = true)
+    public void surCraftDiamant(CraftItemEvent event) {
+        if (!plugin.getGameManager().estEnCours() || event.getRecipe() == null || event.getRecipe().getResult() == null) {
+            return;
+        }
+        if (!(event.getWhoClicked() instanceof Player)) {
+            return;
+        }
+        Material typeResultat = event.getRecipe().getResult().getType();
+        if (!OBJETS_DIAMANT_LIMITES.contains(typeResultat)) {
+            return;
+        }
+        Player joueur = (Player) event.getWhoClicked();
+        int limite = plugin.getConfig().getInt("survie-uhc.limite-stuff-diamant", 2);
+        if (compterObjetsEnDiamant(joueur) >= limite) {
+            event.setCancelled(true);
+            Msg.envoyer(joueur, "&cVous avez déjà atteint la limite de " + limite + " objet(s) en diamant.");
+        }
+    }
+
+    private int compterObjetsEnDiamant(Player joueur) {
+        int total = 0;
+        for (ItemStack item : joueur.getInventory().getContents()) {
+            if (item != null && OBJETS_DIAMANT_LIMITES.contains(item.getType())) {
+                total += item.getAmount();
+            }
+        }
+        for (ItemStack item : joueur.getInventory().getArmorContents()) {
+            if (item != null && OBJETS_DIAMANT_LIMITES.contains(item.getType())) {
+                total += item.getAmount();
+            }
+        }
+        return total;
     }
 
     @EventHandler(ignoreCancelled = true)
@@ -437,10 +609,26 @@ public class UHCRulesListener implements Listener {
     }
 
     /**
-     * Succès Minecraft entièrement désactivés : rien à voir avec LGUHC, juste du bruit
-     * indésirable dans le chat. Annuler l'événement empêche à la fois le message "X vient
-     * d'obtenir le succès..." ET l'obtention réelle du succès (pas seulement son annonce).
+     * Remplace le tirage vanilla (10% de chance de silex, sinon gravier) par un tirage à
+     * TAUX_DROP_SILEX (50% par défaut) : on annule le drop naturel et on fait tomber nous-mêmes
+     * soit du silex, soit du gravier, jamais les deux. Le Silk Touch (toujours du gravier en
+     * vanilla, jamais de silex) reste respecté : on ne touche à rien dans ce cas.
      */
+    @EventHandler(ignoreCancelled = true)
+    public void surGravier(BlockBreakEvent event) {
+        if (!plugin.getGameManager().estEnCours() || event.getBlock().getType() != Material.GRAVEL) {
+            return;
+        }
+        ItemStack outil = event.getPlayer().getItemInHand();
+        if (outil != null && outil.containsEnchantment(Enchantment.SILK_TOUCH)) {
+            return;
+        }
+        event.setCancelled(true);
+        event.getBlock().setType(Material.AIR);
+        Material drop = Math.random() < TAUX_DROP_SILEX ? Material.FLINT : Material.GRAVEL;
+        event.getPlayer().getWorld().dropItemNaturally(event.getBlock().getLocation(), new ItemStack(drop));
+    }
+
     @EventHandler(ignoreCancelled = true)
     public void surSucces(PlayerAchievementAwardedEvent event) {
         event.setCancelled(true);
