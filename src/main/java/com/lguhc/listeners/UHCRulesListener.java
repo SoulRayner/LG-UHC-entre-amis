@@ -48,7 +48,7 @@ public class UHCRulesListener implements Listener {
     private final LGUHCPlugin plugin;
 
     /** XP donnée par lingot, identique à la vraie fonte au four vanilla 1.8 (FurnaceRecipes). */
-    private static final double XP_FONTE_FER = 0.7;
+    private static final double XP_FONTE_FER = 1.0;
     private static final double XP_FONTE_OR = 1.0;
     private static final double XP_FONTE_DIAMAND = 1.0;
 
@@ -150,7 +150,7 @@ public class UHCRulesListener implements Listener {
 
         if (ench.equals(Enchantment.ARROW_DAMAGE)) {
             if (role == RoleType.CHASSEUR) {
-                return config.getInt("survie-uhc.chasseur-bonus-puissance", 4);
+                return config.getInt("survie-uhc.chasseur-bonus-puissance", 3);
             }
             return config.getInt("survie-uhc.niveau-max-puissance", 2);
         }
@@ -171,7 +171,6 @@ public class UHCRulesListener implements Listener {
         }
 
         if (nom.contains("DIAMOND")) {
-            // Exception Assassin : Protection 3 autorisée uniquement sur son plastron en diamant
             if (role == RoleType.ASSASSIN && materiel == Material.DIAMOND_CHESTPLATE) {
                 return 3;
             }
@@ -550,18 +549,18 @@ public class UHCRulesListener implements Listener {
         ItemStack outil = event.getPlayer().getItemInHand();
 
         if (type == Material.IRON_ORE) {
-            //event.setCancelled(true);
-            //event.getBlock().setType(Material.AIR);
-            event.getBlock().getDrops().clear();
+            event.setCancelled(true);
+            event.getBlock().setType(Material.AIR);
+            //event.getBlock().getDrops().clear();
             int quantite = calculerDropFortune(outil, 1);
             event.getPlayer().getWorld().dropItemNaturally(event.getBlock().getLocation(), new ItemStack(Material.IRON_INGOT, quantite));
             donnerExpFonte(event.getBlock().getLocation(), gp, XP_FONTE_FER);
             return;
         }
         if (type == Material.GOLD_ORE) {
-            //event.setCancelled(true);
-            //event.getBlock().setType(Material.AIR);
-            event.getBlock().getDrops().clear();
+            event.setCancelled(true);
+            event.getBlock().setType(Material.AIR);
+            //event.getBlock().getDrops().clear();
             int quantite = calculerDropFortune(outil, 1);
             event.getPlayer().getWorld().dropItemNaturally(event.getBlock().getLocation(), new ItemStack(Material.GOLD_INGOT, quantite));
             donnerExpFonte(event.getBlock().getLocation(), gp, XP_FONTE_OR);
@@ -573,9 +572,9 @@ public class UHCRulesListener implements Listener {
             int limite = plugin.getConfig().getInt("survie-uhc.limite-diamants-mines", 17);
             donnerExpFonte(event.getBlock().getLocation(), gp, XP_FONTE_DIAMAND);
             if (mines > limite) {
-                //event.setCancelled(true);
-                //event.getBlock().setType(Material.AIR);
-                event.getBlock().getDrops().clear();
+                event.setCancelled(true);
+                event.getBlock().setType(Material.AIR);
+                //event.getBlock().getDrops().clear();
                 int quantite = calculerDropFortune(outil, 2);
                 event.getPlayer().getWorld().dropItemNaturally(event.getBlock().getLocation(), new ItemStack(Material.GOLD_INGOT, quantite));
                 Msg.envoyer(event.getPlayer(), "&6Limite de " + limite + " diamants minés atteinte : vous recevez 2 lingots d'or à la place.");
