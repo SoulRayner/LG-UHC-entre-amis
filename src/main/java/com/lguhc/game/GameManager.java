@@ -781,7 +781,7 @@ public class GameManager {
     }
 
     // ================= Déroulement des épisodes =================
-
+// ici caca 1
     private void finDePremierEpisode() {
         if (phase == GamePhase.TERMINEE) {
             return;

@@ -89,7 +89,7 @@ vote:
   # 1 vote à chaque épisode à partir de celui-ci. Il faut au moins 3 votes sur
   # un même joueur pour qu'il soit sanctionné (Poison I 13s + pseudo annoncé
   # avec 4 rôles tirés au sort parmi les vivants, dont le sien).
-  episode-premier-vote: 3
+  episode-premier-vote: 4
   duree-secondes: 120
 
 groupes-dynamiques:

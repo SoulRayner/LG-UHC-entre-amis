@@ -38,6 +38,7 @@ import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.weather.WeatherChangeEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.EnchantmentStorageMeta;
+import org.bukkit.configuration.file.FileConfiguration;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -128,28 +129,62 @@ public class UHCRulesListener implements Listener {
      *               reste (Puissance, Protection, interdictions) ne dépend pas du joueur.
      */
     private int maxAutorise(Enchantment ench, Material materiel, Player joueur) {
-        if (ench.equals(Enchantment.FIRE_ASPECT) && plugin.getConfig().getBoolean("survie-uhc.enchant-fire-aspect-interdit", true)) {
-            return 0;
+        FileConfiguration config = plugin.getConfig();
+        RoleType role = getRoleJoueur(joueur);
+
+        if (ench.equals(Enchantment.FIRE_ASPECT)) return 0;
+        if (ench.equals(Enchantment.KNOCKBACK))   return 0;
+        if (ench.equals(Enchantment.ARROW_FIRE))  return 0;
+
+
+        if (ench.equals(Enchantment.ARROW_KNOCKBACK)) {
+            return (role == RoleType.CUPIDON) ? 1 : 0;
         }
-        if (ench.equals(Enchantment.ARROW_FIRE) && plugin.getConfig().getBoolean("survie-uhc.enchant-flame-interdit", true)) {
-            return 0;
-        }
-        if (ench.equals(Enchantment.KNOCKBACK) && plugin.getConfig().getBoolean("survie-uhc.enchant-knockback-interdit", true)) {
-            return 0;
-        }
+
+
         if (ench.equals(Enchantment.DAMAGE_ALL)) {
-            if (estCampSolo(joueur)) {
-                return plugin.getConfig().getInt("survie-uhc.niveau-max-tranchant-solo", 4);
-            }
-            return plugin.getConfig().getInt("survie-uhc.niveau-max-tranchant", 3);
+            return estCampSolo(joueur)
+                    ? config.getInt("survie-uhc.niveau-max-tranchant-solo", 4)
+                    : config.getInt("survie-uhc.niveau-max-tranchant", 3);
         }
+
         if (ench.equals(Enchantment.ARROW_DAMAGE)) {
-            return plugin.getConfig().getInt("survie-uhc.niveau-max-puissance", 2);
+            if (role == RoleType.CHASSEUR) {
+                return config.getInt("survie-uhc.chasseur-bonus-puissance", 4);
+            }
+            return config.getInt("survie-uhc.niveau-max-puissance", 2);
         }
+
         if (ench.equals(Enchantment.PROTECTION_ENVIRONMENTAL)) {
-            return capProtectionPour(materiel);
+            return capProtectionPour(materiel, role);
         }
+
         return Integer.MAX_VALUE;
+    }
+
+    private int capProtectionPour(Material materiel, RoleType role) {
+        String nom = materiel.name();
+        boolean estUneArmure = nom.contains("HELMET") || nom.contains("CHESTPLATE")
+                || nom.contains("LEGGINGS") || nom.contains("BOOTS");
+        if (!estUneArmure) {
+            return Integer.MAX_VALUE;
+        }
+
+        if (nom.contains("DIAMOND")) {
+            // Exception Assassin : Protection 3 autorisée uniquement sur son plastron en diamant
+            if (role == RoleType.ASSASSIN && materiel == Material.DIAMOND_CHESTPLATE) {
+                return 3;
+            }
+            return plugin.getConfig().getInt("survie-uhc.niveau-max-protection-diamant", 2);
+        }
+
+        return plugin.getConfig().getInt("survie-uhc.niveau-max-protection-fer", 3);
+    }
+
+    private RoleType getRoleJoueur(Player joueur) {
+        if (joueur == null) return null;
+        GamePlayer gp = plugin.getGameManager().getGamePlayer(joueur);
+        return gp != null ? gp.getRole() : null;
     }
 
     /** Vrai si ce joueur est actuellement du camp Solitaire (Assassin) — utilisé pour le plafond Tranchant dédié. */
