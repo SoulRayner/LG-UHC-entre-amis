@@ -807,7 +807,12 @@ public class GameManager {
             org.bukkit.inventory.ItemStack piece = armure[i];
             if (piece != null && piece.getType().name().startsWith("DIAMOND_") && piecesDiamant > 2) {
                 armure[i] = null;
-                p.getInventory().addItem(piece);
+
+                java.util.Map<Integer, org.bukkit.inventory.ItemStack> reste = p.getInventory().addItem(piece);
+                for (org.bukkit.inventory.ItemStack drop : reste.values()) {
+                    p.getWorld().dropItemNaturally(p.getLocation(), drop);
+                }
+
                 piecesDiamant--;
             }
         }
