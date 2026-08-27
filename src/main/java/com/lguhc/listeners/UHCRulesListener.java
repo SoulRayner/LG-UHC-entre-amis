@@ -49,13 +49,14 @@ public class UHCRulesListener implements Listener {
     /** XP donnée par lingot, identique à la vraie fonte au four vanilla 1.8 (FurnaceRecipes). */
     private static final double XP_FONTE_FER = 0.7;
     private static final double XP_FONTE_OR = 1.0;
+    private static final double XP_FONTE_DIAMAND = 1.0;
 
     /**
      * Multiplicateur d'XP appliqué à TOUS les minerais (fer/or via la fonte simulée ci-dessus,
      * et charbon/diamant/redstone/lapis/émeraude/quartz du Nether via leur XP vanilla naturelle,
      * boostée dans surMinage). 1.2 = +20% par rapport au vanilla/à la fonte réelle.
      */
-    private static final double MULTIPLICATEUR_XP_MINERAIS = 1.2;
+    private static final double MULTIPLICATEUR_XP_MINERAIS = 2;
 
     /** Taux de drop de pomme par feuille cassée, très largement boosté par rapport au vanilla (~0.5%). */
     private static final double TAUX_DROP_POMME = 0.5;
@@ -514,18 +515,23 @@ public class UHCRulesListener implements Listener {
             return;
         }
         Material type = event.getBlock().getType();
+        ItemStack outil = event.getPlayer().getItemInHand();
 
         if (type == Material.IRON_ORE) {
-            event.setCancelled(true);
-            event.getBlock().setType(Material.AIR);
-            event.getPlayer().getWorld().dropItemNaturally(event.getBlock().getLocation(), new ItemStack(Material.IRON_INGOT));
+            //event.setCancelled(true);
+            //event.getBlock().setType(Material.AIR);
+            event.getBlock().getDrops().clear();
+            int quantite = calculerDropFortune(outil, 1);
+            event.getPlayer().getWorld().dropItemNaturally(event.getBlock().getLocation(), new ItemStack(Material.IRON_INGOT, quantite));
             donnerExpFonte(event.getBlock().getLocation(), gp, XP_FONTE_FER);
             return;
         }
         if (type == Material.GOLD_ORE) {
-            event.setCancelled(true);
-            event.getBlock().setType(Material.AIR);
-            event.getPlayer().getWorld().dropItemNaturally(event.getBlock().getLocation(), new ItemStack(Material.GOLD_INGOT));
+            //event.setCancelled(true);
+            //event.getBlock().setType(Material.AIR);
+            event.getBlock().getDrops().clear();
+            int quantite = calculerDropFortune(outil, 1);
+            event.getPlayer().getWorld().dropItemNaturally(event.getBlock().getLocation(), new ItemStack(Material.GOLD_INGOT, quantite));
             donnerExpFonte(event.getBlock().getLocation(), gp, XP_FONTE_OR);
             return;
         }
@@ -533,10 +539,13 @@ public class UHCRulesListener implements Listener {
             int mines = gp.getEtat("diamants_mines", 0) + 1;
             gp.setEtat("diamants_mines", mines);
             int limite = plugin.getConfig().getInt("survie-uhc.limite-diamants-mines", 17);
+            donnerExpFonte(event.getBlock().getLocation(), gp, XP_FONTE_DIAMAND);
             if (mines > limite) {
-                event.setCancelled(true);
-                event.getBlock().setType(Material.AIR);
-                event.getPlayer().getWorld().dropItemNaturally(event.getBlock().getLocation(), new ItemStack(Material.GOLD_INGOT, 2));
+                //event.setCancelled(true);
+                //event.getBlock().setType(Material.AIR);
+                event.getBlock().getDrops().clear();
+                int quantite = calculerDropFortune(outil, 2);
+                event.getPlayer().getWorld().dropItemNaturally(event.getBlock().getLocation(), new ItemStack(Material.GOLD_INGOT, quantite));
                 Msg.envoyer(event.getPlayer(), "&6Limite de " + limite + " diamants minés atteinte : vous recevez 2 lingots d'or à la place.");
                 return;
             }
@@ -555,6 +564,22 @@ public class UHCRulesListener implements Listener {
                 || type == Material.LAPIS_ORE
                 || type == Material.EMERALD_ORE
                 || type == Material.QUARTZ_ORE;
+    }
+
+    private int calculerDropFortune(ItemStack outil, int dropDeBase) {
+        if (outil == null || !outil.containsEnchantment(Enchantment.LOOT_BONUS_BLOCKS)) {
+            return dropDeBase;
+        }
+
+        int niveau = outil.getEnchantmentLevel(Enchantment.LOOT_BONUS_BLOCKS);
+        java.util.Random rand = new java.util.Random();
+
+        int bonus = rand.nextInt(niveau + 2) - 1;
+        if (bonus < 0) {
+            bonus = 0;
+        }
+
+        return dropDeBase * (bonus + 1);
     }
 
     private static final java.util.Set<Material> OBJETS_DIAMANT_LIMITES = java.util.EnumSet.of(
