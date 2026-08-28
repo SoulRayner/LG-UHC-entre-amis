@@ -52,6 +52,7 @@ public class AbilityListener implements Listener {
                         && g.getPlayer().getWorld().equals(joueur.getWorld())
                         && g.getPlayer().getLocation().distance(joueur.getLocation()) <= DruideRole.RAYON)
                 .count();
+        sombresProches--;
         Msg.envoyer(joueur, "&2La nature vous murmure : &a" + sombresProches + " &2aura(s) Obscure(s) détectée(s) dans un rayon de 50 blocs.");
     }
 

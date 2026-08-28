@@ -135,29 +135,26 @@ public class ScoreboardManager {
 
     /** Crée une équipe par couleur assignée par ce joueur, et y ajoute les cibles concernées (visible pour lui seul). */
     private void appliquerCouleursPersonnalisees(Scoreboard board, GamePlayer gp, GameManager gm) {
-        int compteur = 0;
         for (Map.Entry<UUID, ChatColor> entree : gp.getCouleursPersonnalisees().entrySet()) {
             GamePlayer cible = gm.getGamePlayer(entree.getKey());
             if (cible == null || cible.getPlayer() == null) {
                 continue;
             }
-            String nomEquipe = "lgc" + (compteur++);
+
+            String nomEquipe = cible.getPlayer().getName();
+            if (nomEquipe.length() > 16) {
+                nomEquipe = nomEquipe.substring(0, 16);
+            }
+
             Team equipe = board.getTeam(nomEquipe) != null ? board.getTeam(nomEquipe) : board.registerNewTeam(nomEquipe);
             equipe.setPrefix(entree.getValue().toString());
-            // Une Team en NameTagVisibility.ALWAYS (réglage par défaut) force l'affichage du
-            // pseudo flottant au-dessus de la tête même pour une entité normalement invisible
-            // (c'est d'ailleurs la technique utilisée par les plugins d'ESP/glow pour ça) : ça
-            // "grillait" donc la Petite Fille ou le Loup Perfide pendant qu'ils sont invisibles.
-            // NEVER masque uniquement ce tag flottant - la couleur reste appliquée dans la
-            // tab-list, qui n'est pas concernée par ce réglage - et redevient ALWAYS dès que la
-            // cible n'est plus sous invisibilité (ce bloc tourne à chaque rafraichissement du
-            // scoreboard, donc la transition suit l'effet de potion en temps réel).
+
             boolean cibleInvisible = cible.getPlayer().hasPotionEffect(PotionEffectType.INVISIBILITY);
             equipe.setNameTagVisibility(cibleInvisible ? NameTagVisibility.NEVER : NameTagVisibility.ALWAYS);
+
             try {
                 equipe.addPlayer(cible.getPlayer());
             } catch (Exception ignored) {
-                // Si l'API diffère légèrement, on ignore plutôt que de bloquer tout le scoreboard.
             }
         }
     }
